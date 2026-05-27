@@ -19,7 +19,7 @@ windows = { version = ">=0.59, <=0.62", features = [
 ] }
 tray-icon = "0.21"
 muda = "0.17"
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "image"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json"] }

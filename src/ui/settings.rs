@@ -7,18 +7,21 @@
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use iced::alignment;
 use iced::application::Appearance;
-use iced::widget::{Space, button, column, container, mouse_area, row, text};
+use iced::widget::{
+    Space, button, column, container, image as image_widget, mouse_area, row, text,
+};
 use iced::{
-    Alignment, Color, Element, Length, Pixels, Settings, Size, Subscription, Task, Theme, window,
+    Alignment, Color, ContentFit, Element, Length, Pixels, Settings, Size, Subscription, Task,
+    Theme, window,
 };
 use log::warn;
-use windows::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME};
+use windows::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
@@ -27,7 +30,8 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    CreateIconFromResourceEx, EnumWindows, GetWindowTextW, GetWindowThreadProcessId, ICON_BIG,
+    ICON_SMALL, ICON_SMALL2, IsWindowVisible, LR_DEFAULTCOLOR, SendMessageW, WM_SETICON,
 };
 use windows::core::BOOL;
 
@@ -36,10 +40,10 @@ use crate::config::Config;
 use crate::process_watcher;
 
 const REPO_URL: &str = "https://github.com/ghostface2232/cleankakao";
-const WINDOW_TITLE: &str = "CleanKakao 설정";
+const WINDOW_TITLE: &str = " ";
 const WINDOW_SIZE: Size = Size {
     width: 400.0,
-    height: 580.0,
+    height: 585.0,
 };
 
 const PILL_WIDTH: f32 = 42.0;
@@ -48,6 +52,9 @@ const PILL_THUMB: f32 = 16.0;
 const PILL_PAD: u16 = ((PILL_HEIGHT - PILL_THUMB) / 2.0) as u16;
 const STATUS_TICK: Duration = Duration::from_secs(1);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const LOGO_SIZE: f32 = 90.0;
+const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
+const SETTINGS_TASKBAR_ICON_SIZE: i32 = 32;
 
 // How long the Mica setup thread keeps polling for our top-level HWND before
 // giving up. The window normally exists within ~100 ms; 3 s is generous.
@@ -145,7 +152,14 @@ impl State {
     fn view(&self) -> Element<'_, Message> {
         let tokens = Tokens::for_mode(self.mode);
 
-        let header = column![
+        let logo = logo_image_handle().map(|handle| {
+            image_widget(handle)
+                .width(Length::Fixed(LOGO_SIZE))
+                .height(Length::Fixed(LOGO_SIZE))
+                .content_fit(ContentFit::Contain)
+        });
+
+        let header_text = column![
             text("CleanKakao")
                 .font(theme::HEADING_FONT)
                 .size(theme::HEADING_SIZE)
@@ -155,6 +169,13 @@ impl State {
                 .color(tokens.text_secondary),
         ]
         .spacing(2);
+
+        let header = column![
+            logo.map(Element::from)
+                .unwrap_or_else(|| Space::new(LOGO_SIZE, LOGO_SIZE).into()),
+            header_text,
+        ]
+        .spacing(8);
 
         let ad_block_on = self.config.ad_block_banner || self.config.ad_block_popup;
         let ad_block = section(
@@ -250,15 +271,7 @@ impl State {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let body = column![
-            header,
-            ad_block,
-            general,
-            status,
-            Space::with_height(Length::Fill),
-            footer,
-        ]
-        .spacing(18);
+        let body = column![header, ad_block, general, status, footer,].spacing(18);
 
         container(body)
             .padding(20)
@@ -500,33 +513,9 @@ pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
             max_size: Some(WINDOW_SIZE),
             resizable: false,
             transparent: true,
-            icon: load_window_icon(),
             ..Default::default()
         })
         .run_with(move || (State::new(config_handle.clone()), Task::none()))
-}
-
-/// Decode the embedded ICO once and hand the largest decoded frame to iced
-/// for the title bar and taskbar entry. The `image` crate's ICO loader picks
-/// the highest-resolution sub-image automatically.
-fn load_window_icon() -> Option<window::Icon> {
-    match image::load_from_memory_with_format(WINDOW_ICON_BYTES, image::ImageFormat::Ico) {
-        Ok(decoded) => {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            match window::icon::from_rgba(rgba.into_raw(), width, height) {
-                Ok(icon) => Some(icon),
-                Err(e) => {
-                    warn!("settings: window icon rgba conversion failed: {e}");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            warn!("settings: window icon decode failed: {e}");
-            None
-        }
-    }
 }
 
 /// Poll for the settings window by title from a worker thread, then apply
@@ -546,6 +535,8 @@ fn spawn_mica_setup(title: &'static str, mode: Mode) {
             // our explicit Mica backdrop.
             thread::sleep(MICA_POST_CREATE_DELAY);
             apply_mica(hwnd, mode);
+            hide_titlebar_icon(hwnd);
+            apply_taskbar_icon(hwnd);
         })
         .map_err(|e| warn!("settings: failed to spawn Mica setup thread: {e}"))
         .ok();
@@ -651,6 +642,167 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
             warn!("settings: DWMWA_SYSTEMBACKDROP_TYPE failed: {e}");
         }
     }
+}
+
+fn hide_titlebar_icon(hwnd: HWND) {
+    // SAFETY: `hwnd` is a live top-level window owned by this process. Passing a
+    // null icon handle clears the non-client small icon slots only.
+    unsafe {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(0)),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL2 as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
+fn apply_taskbar_icon(hwnd: HWND) {
+    let hicon = match hicon_from_ico_bytes(WINDOW_ICON_BYTES) {
+        Ok(hicon) => hicon,
+        Err(e) => {
+            warn!("settings: failed to create taskbar icon: {e}");
+            return;
+        }
+    };
+
+    // SAFETY: `hwnd` is a live top-level window owned by this process. `hicon`
+    // is an owned icon handle created from embedded ICO bytes and kept alive
+    // for the lifetime of this short-lived settings subprocess.
+    unsafe {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(hicon.0 as isize)),
+        );
+    }
+}
+
+fn hicon_from_ico_bytes(
+    bytes: &'static [u8],
+) -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, String> {
+    let image = select_ico_image(bytes)?;
+
+    // SAFETY: `image` is a slice into embedded ICO data and contains one icon
+    // image resource selected from a validated ICO directory entry.
+    unsafe {
+        CreateIconFromResourceEx(
+            image,
+            true,
+            ICON_RESOURCE_VERSION,
+            SETTINGS_TASKBAR_ICON_SIZE,
+            SETTINGS_TASKBAR_ICON_SIZE,
+            LR_DEFAULTCOLOR,
+        )
+    }
+    .map_err(|e| e.to_string())
+}
+
+fn select_ico_image(bytes: &'static [u8]) -> Result<&'static [u8], String> {
+    if bytes.len() < 6 {
+        return Err("ICO data is too short".into());
+    }
+
+    let reserved = read_u16(bytes, 0)?;
+    let image_type = read_u16(bytes, 2)?;
+    let count = read_u16(bytes, 4)? as usize;
+
+    if reserved != 0 || image_type != 1 {
+        return Err("ICO header is invalid".into());
+    }
+
+    let entries_end = 6usize
+        .checked_add(
+            count
+                .checked_mul(16)
+                .ok_or_else(|| "ICO entry table is too large".to_string())?,
+        )
+        .ok_or_else(|| "ICO entry table overflows".to_string())?;
+    if bytes.len() < entries_end {
+        return Err("ICO entry table is truncated".into());
+    }
+
+    let mut best: Option<(usize, (u32, u32, u32))> = None;
+    for index in 0..count {
+        let offset = 6 + index * 16;
+        let width = decode_ico_dimension(bytes[offset]);
+        let height = decode_ico_dimension(bytes[offset + 1]);
+        let size = read_u32(bytes, offset + 8)? as usize;
+        let image_offset = read_u32(bytes, offset + 12)? as usize;
+        let image_end = image_offset
+            .checked_add(size)
+            .ok_or_else(|| "ICO image range overflows".to_string())?;
+
+        if image_offset >= bytes.len() || image_end > bytes.len() || size == 0 {
+            continue;
+        }
+
+        let desired = SETTINGS_TASKBAR_ICON_SIZE as u32;
+        let too_small_penalty = u32::from(width < desired || height < desired);
+        let max_size_delta = width.max(height).abs_diff(desired);
+        let shape_delta = width.abs_diff(desired) + height.abs_diff(desired);
+        let score = (too_small_penalty, max_size_delta, shape_delta);
+
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((index, score));
+        }
+    }
+
+    let (index, _) = best.ok_or_else(|| "ICO contains no usable image".to_string())?;
+    let offset = 6 + index * 16;
+    let size = read_u32(bytes, offset + 8)? as usize;
+    let image_offset = read_u32(bytes, offset + 12)? as usize;
+
+    Ok(&bytes[image_offset..image_offset + size])
+}
+
+fn decode_ico_dimension(value: u8) -> u32 {
+    if value == 0 { 256 } else { value as u32 }
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
+    let end = offset
+        .checked_add(2)
+        .ok_or_else(|| "offset overflows".to_string())?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| "unexpected end of data".to_string())?;
+    Ok(u16::from_le_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| "offset overflows".to_string())?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| "unexpected end of data".to_string())?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn logo_image_handle() -> Option<image_widget::Handle> {
+    static HANDLE: OnceLock<Option<image_widget::Handle>> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            let decoded =
+                image::load_from_memory_with_format(WINDOW_ICON_BYTES, image::ImageFormat::Ico)
+                    .ok()?;
+            let rgba = decoded.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            Some(image_widget::Handle::from_rgba(
+                width,
+                height,
+                rgba.into_raw(),
+            ))
+        })
+        .clone()
 }
 
 fn is_window_visible(hwnd: HWND) -> bool {
