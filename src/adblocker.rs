@@ -22,7 +22,7 @@ use windows::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, FindWindowW, GWL_STYLE, GetClassNameW, GetParent,
+    EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetClassNameW, GetParent,
     GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOP, IsIconic,
     IsWindow, IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     SetWindowPos, ShowWindow, WS_POPUP,
@@ -40,15 +40,38 @@ const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
 const LAYOUT_SHADOW_PADDING: i32 = 2;
 const MAIN_VIEW_BOTTOM_PADDING: i32 = 31;
 
-// Conservative fallback for a direct empty EVA_ChildWindow ad slot. This is
-// intentionally narrower than the old descendant-wide geometry heuristic.
-const DIRECT_BANNER_MIN_HEIGHT: i32 = 20;
-const DIRECT_BANNER_MAX_HEIGHT: i32 = 140;
+// Conservative fallback for a direct empty EVA_ChildWindow ad slot. In
+// KakaoTalk 25.x this bottom banner is consistently 91 px tall across
+// 1080p/1440p/2160p layouts, so keep the classifier tight to avoid hiding
+// birthday/media/profile surfaces that merely look like small empty panes.
+const DIRECT_BANNER_HEIGHT: i32 = 91;
+const DIRECT_BANNER_HEIGHT_TOLERANCE_PX: i32 = 2;
 const DIRECT_BANNER_MIN_WIDTH_RATIO: f32 = 0.70;
 const DIRECT_BANNER_BOTTOM_TOLERANCE_PX: i32 = 12;
 
 const POPUP_MIN_DIM: i32 = 80;
 const POPUP_MAX_DIM: i32 = 900;
+const PROTECTED_KEYWORDS: &[&str] = &[
+    "birthday",
+    "calendar",
+    "call",
+    "media",
+    "player",
+    "poll",
+    "profile",
+    "setting",
+    "video",
+    "동영상",
+    "미디어",
+    "생일",
+    "설정",
+    "영상",
+    "영상통화",
+    "일정",
+    "투표",
+    "페이스톡",
+    "프로필",
+];
 
 #[derive(Debug, Clone, Copy)]
 struct WindowState {
@@ -252,7 +275,9 @@ impl AdBlocker {
         if parent_hwnd(child).map(|p| p.0) != Some(main.0) {
             return false;
         }
-        if class_name(child) != "EVA_ChildWindow" || !window_text(child).is_empty() {
+        let class = class_name(child);
+        let is_banner_class = class == "EVA_ChildWindow" || class == "EVA_Window_Dblclk";
+        if !is_banner_class || !window_text(child).is_empty() {
             return false;
         }
         // KakaoTalk uses _EVA_ descendants for custom scroll surfaces. The
@@ -266,15 +291,7 @@ impl AdBlocker {
             Some(r) => r,
             None => return false,
         };
-        let main_width = main_rect.right - main_rect.left;
-        let w = rect.right - rect.left;
-        let h = rect.bottom - rect.top;
-        let near_bottom =
-            (main_rect.bottom - rect.bottom).abs() <= DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
-        let wide_enough = (w as f32) >= (main_width as f32) * DIRECT_BANNER_MIN_WIDTH_RATIO;
-        let strip_height = (DIRECT_BANNER_MIN_HEIGHT..=DIRECT_BANNER_MAX_HEIGHT).contains(&h);
-
-        near_bottom && wide_enough && strip_height
+        is_bottom_banner_rect(main_rect, &rect)
     }
 
     fn remove_ad(&mut self, ad: &AdWindow) {
@@ -436,13 +453,53 @@ fn has_descendant_class_prefix(hwnd: HWND, prefix: &str) -> bool {
 
 fn has_chrome_descendant(hwnd: HWND) -> bool {
     enum_descendants(hwnd).into_iter().any(|child| {
-        let class = class_name(child);
         let text = window_text(child);
-        class.starts_with("Chrome_RenderWidgetHost")
-            || class.starts_with("Chrome_WidgetWin")
-            || class == "Chrome Legacy Window"
-            || text == "Chrome Legacy Window"
+        text == "Chrome Legacy Window"
     })
+}
+
+fn has_protected_keyword(hwnd: HWND, configured: &[String]) -> bool {
+    let configured = configured.iter().map(String::as_str);
+    let protected = PROTECTED_KEYWORDS.iter().copied().chain(configured);
+
+    let mut haystacks = vec![window_text(hwnd)];
+    for child in enum_descendants(hwnd) {
+        haystacks.push(window_text(child));
+    }
+
+    protected.into_iter().any(|keyword| {
+        !keyword.is_empty()
+            && haystacks
+                .iter()
+                .any(|text| contains_ignore_ascii_case(text, keyword))
+    })
+}
+
+fn contains_ignore_ascii_case(text: &str, needle: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
+    let main_width = main_rect.right - main_rect.left;
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    let near_bottom =
+        (main_rect.bottom - rect.bottom).abs() <= DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
+    let wide_enough = (width as f32) >= (main_width as f32) * DIRECT_BANNER_MIN_WIDTH_RATIO;
+    let exact_height =
+        (height - DIRECT_BANNER_HEIGHT).abs() <= DIRECT_BANNER_HEIGHT_TOLERANCE_PX;
+
+    near_bottom && wide_enough && exact_height
+}
+
+fn is_in_bottom_banner_band(main_rect: &RECT, rect: &RECT) -> bool {
+    let band_top =
+        main_rect.bottom - DIRECT_BANNER_HEIGHT - DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
+    let horizontal_overlap =
+        rect.right > main_rect.left && rect.left < main_rect.right && rect.right > rect.left;
+    let vertical_overlap = rect.bottom > band_top && rect.top < main_rect.bottom;
+    horizontal_overlap && vertical_overlap
 }
 
 // ===========================================================================
@@ -451,6 +508,7 @@ fn has_chrome_descendant(hwnd: HWND) -> bool {
 
 struct PopupCtx<'a> {
     main_key: isize,
+    main_rect: RECT,
     pid: u32,
     whitelist: &'a [String],
     seen: HashSet<isize>,
@@ -458,8 +516,13 @@ struct PopupCtx<'a> {
 }
 
 fn find_popup_ads(main_hwnd: HWND, pid: u32, whitelist: &[String]) -> Vec<AdWindow> {
+    let main_rect = match window_rect(main_hwnd) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
     let mut ctx = PopupCtx {
         main_key: main_hwnd.0 as isize,
+        main_rect,
         pid,
         whitelist,
         seen: HashSet::new(),
@@ -468,7 +531,103 @@ fn find_popup_ads(main_hwnd: HWND, pid: u32, whitelist: &[String]) -> Vec<AdWind
     let lparam = LPARAM(&mut ctx as *mut PopupCtx<'_> as isize);
     // SAFETY: ctx outlives this synchronous EnumWindows call.
     let _ = unsafe { EnumWindows(Some(collect_popup), lparam) };
+    let thread_id = window_thread_id(main_hwnd);
+    if thread_id != 0 {
+        // SAFETY: ctx still outlives this synchronous EnumThreadWindows call.
+        let _ = unsafe { EnumThreadWindows(thread_id, Some(collect_popup), lparam) };
+    }
+    for hwnd in enum_related_process_windows(main_hwnd, pid) {
+        let already_selected = ctx.out.iter().any(|ad| ad.hwnd().0 == hwnd.0);
+        if !already_selected
+            && (is_bottom_banner_frame(hwnd, ctx.main_key, &ctx.main_rect, whitelist)
+                || is_bottom_banner_render_surface(hwnd, &ctx.main_rect, whitelist))
+        {
+            ctx.out.push(AdWindow::BannerSlot { hwnd });
+        }
+    }
     ctx.out
+}
+
+fn enum_related_process_windows(main_hwnd: HWND, pid: u32) -> Vec<HWND> {
+    struct Ctx {
+        pid: u32,
+        out: Vec<HWND>,
+    }
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam points at the live Ctx created in
+        // enum_related_process_windows.
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        if window_pid(hwnd) == ctx.pid {
+            ctx.out.push(hwnd);
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = Ctx {
+        pid,
+        out: Vec::new(),
+    };
+    let lparam = LPARAM(&mut ctx as *mut Ctx as isize);
+    // SAFETY: ctx outlives this synchronous EnumWindows call.
+    let _ = unsafe { EnumWindows(Some(collect), lparam) };
+    let thread_id = window_thread_id(main_hwnd);
+    if thread_id != 0 {
+        // SAFETY: ctx outlives this synchronous EnumThreadWindows call.
+        let _ = unsafe { EnumThreadWindows(thread_id, Some(collect), lparam) };
+    }
+    let parents = ctx.out.clone();
+    for parent in parents {
+        for child in enum_descendants(parent) {
+            if window_pid(child) == pid {
+                ctx.out.push(child);
+            }
+        }
+    }
+    ctx.out.sort_by_key(|h| h.0 as isize);
+    ctx.out.dedup_by_key(|h| h.0 as isize);
+    ctx.out
+}
+
+fn is_bottom_banner_frame(
+    hwnd: HWND,
+    main_key: isize,
+    main_rect: &RECT,
+    whitelist: &[String],
+) -> bool {
+    if !is_window_visible(hwnd) {
+        return false;
+    }
+    if class_name(hwnd) != "EVA_Window_Dblclk" || !window_text(hwnd).is_empty() {
+        return false;
+    }
+    if parent_hwnd(hwnd).map(|p| p.0 as isize) != Some(main_key) {
+        return false;
+    }
+    let rect = match window_rect(hwnd) {
+        Some(r) => r,
+        None => return false,
+    };
+    is_bottom_banner_rect(main_rect, &rect) && !has_protected_keyword(hwnd, whitelist)
+}
+
+fn is_bottom_banner_render_surface(hwnd: HWND, main_rect: &RECT, whitelist: &[String]) -> bool {
+    if !is_window_visible(hwnd) {
+        return false;
+    }
+    let class = class_name(hwnd);
+    let is_chrome_surface = class.starts_with("Chrome_RenderWidgetHost")
+        || class.starts_with("Chrome_WidgetWin")
+        || class == "Chrome Legacy Window"
+        || window_text(hwnd) == "Chrome Legacy Window";
+    if !is_chrome_surface || has_protected_keyword(hwnd, whitelist) {
+        return false;
+    }
+    let rect = match window_rect(hwnd) {
+        Some(r) => r,
+        None => return false,
+    };
+    is_in_bottom_banner_band(main_rect, &rect)
 }
 
 unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -506,6 +665,36 @@ unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if !title.is_empty() && ctx.whitelist.iter().any(|kw| title.contains(kw)) {
         return BOOL(1);
     }
+    let class = class_name(hwnd);
+    let parent = parent_hwnd(hwnd);
+    let parent_key = parent.map(|p| p.0 as isize);
+    let is_bottom_banner_frame = class == "EVA_Window_Dblclk"
+        && title.is_empty()
+        && parent_key == Some(ctx.main_key)
+        && is_bottom_banner_rect(&ctx.main_rect, &rect);
+    if is_bottom_banner_frame {
+        if has_protected_keyword(hwnd, ctx.whitelist) {
+            return BOOL(1);
+        }
+        debug!(
+            "bottom banner frame candidate hwnd={:?} size={}x{} title={:?}",
+            hwnd.0, w, h, title
+        );
+        ctx.out.push(AdWindow::BannerSlot { hwnd });
+        return BOOL(1);
+    }
+
+    let is_kakaotalk_ad_popup_shape = match class.as_str() {
+        "EVA_Window" => title.is_empty() && parent.is_none(),
+        "EVA_Window_Dblclk" => title.is_empty() && parent_key == Some(ctx.main_key),
+        _ => false,
+    };
+    if !is_kakaotalk_ad_popup_shape {
+        return BOOL(1);
+    }
+    if has_protected_keyword(hwnd, ctx.whitelist) {
+        return BOOL(1);
+    }
     if !has_chrome_descendant(hwnd) {
         return BOOL(1);
     }
@@ -528,6 +717,12 @@ fn window_pid(hwnd: HWND) -> u32 {
     // HWND and writes the owning process id when available.
     let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     pid
+}
+
+fn window_thread_id(hwnd: HWND) -> u32 {
+    // SAFETY: Passing None for the PID out parameter is documented; the
+    // return value is the owning thread id or 0 for invalid HWNDs.
+    unsafe { GetWindowThreadProcessId(hwnd, None) }
 }
 
 fn window_rect(hwnd: HWND) -> Option<RECT> {
