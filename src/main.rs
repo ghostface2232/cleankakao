@@ -43,9 +43,19 @@ const RUN_REGISTRY_PATH: PCWSTR = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersi
 const RUN_REGISTRY_VALUE: PCWSTR = w!("CleanKakao");
 const REAPPLY_INTERVAL: Duration = Duration::from_millis(2500);
 const MESSAGE_LOOP_WAIT_MS: u32 = 100;
+pub const SETTINGS_SUBPROCESS_FLAG: &str = "--settings";
 
 fn main() {
     env_logger::init();
+
+    // iced/winit insists the EventLoop be built on the main thread (panics
+    // otherwise on Windows). Our main thread already owns the tray Win32
+    // message pump, so the settings window runs in a dedicated child process
+    // whose main thread is iced's. This branch is that child.
+    if std::env::args().any(|arg| arg == SETTINGS_SUBPROCESS_FLAG) {
+        run_settings_subprocess();
+        return;
+    }
 
     let _single_instance = match SingleInstance::acquire() {
         Ok(Some(instance)) => instance,
@@ -259,7 +269,7 @@ fn drain_tray_events(
                     restore_adblocker(adblocker);
                 }
             }
-            TrayEvent::OpenSettings => open_settings_window(Arc::clone(config)),
+            TrayEvent::OpenSettings => ui::open_settings_window(Arc::clone(config)),
             TrayEvent::CheckForUpdates => check_for_updates(),
             TrayEvent::Quit => {
                 app_running.store(false, Ordering::Release);
@@ -284,12 +294,11 @@ fn restore_adblocker(adblocker: &Arc<Mutex<AdBlocker>>) {
     }
 }
 
-fn open_settings_window(config: Arc<RwLock<Config>>) {
-    thread::spawn(move || {
-        let config = config.read().unwrap().clone();
-        let _window_state = ui::settings::SettingsWindow::new(config);
-        info!("settings window requested; iced view is not wired yet");
-    });
+fn run_settings_subprocess() {
+    let config = Arc::new(RwLock::new(Config::load()));
+    if let Err(e) = ui::settings::run(config) {
+        error!("settings window failed: {e}");
+    }
 }
 
 fn check_for_updates() {
