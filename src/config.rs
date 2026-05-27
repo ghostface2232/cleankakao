@@ -9,7 +9,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub ad_block_banner: bool,
     pub ad_block_popup: bool,
-    pub ad_block_bizboard: bool,
     pub auto_start: bool,
     pub check_update: bool,
     pub poll_interval_ms: u64,
@@ -22,7 +21,6 @@ impl Default for Config {
         Self {
             ad_block_banner: true,
             ad_block_popup: true,
-            ad_block_bizboard: true,
             auto_start: false,
             check_update: true,
             poll_interval_ms: 500,
