@@ -137,12 +137,12 @@ pub fn theme_for(mode: Mode) -> Theme {
     Theme::custom(name.to_string(), palette)
 }
 
-/// Transparent root so the DWM Mica backdrop applied to the window shows
-/// through. We still set `text_color` so child widgets inherit the right
-/// foreground color.
+/// Semi-transparent root tint so the DWM Mica backdrop applied to the window
+/// shows through with the same layered feel as WinUI surfaces. We still set
+/// `text_color` so child widgets inherit the right foreground color.
 pub fn root_container(tokens: Tokens) -> impl Fn(&Theme) -> container::Style + 'static {
     move |_| container::Style {
-        background: None,
+        background: Some(Background::Color(mica_root_fill(tokens))),
         text_color: Some(tokens.text_primary),
         border: Border::default(),
         shadow: Shadow::default(),
@@ -151,11 +151,11 @@ pub fn root_container(tokens: Tokens) -> impl Fn(&Theme) -> container::Style + '
 
 pub fn card_container(tokens: Tokens) -> impl Fn(&Theme) -> container::Style + 'static {
     move |_| container::Style {
-        background: Some(Background::Color(tokens.card)),
+        background: Some(Background::Color(mica_card_fill(tokens))),
         text_color: Some(tokens.text_primary),
         border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
+            color: with_alpha(tokens.divider, mica_border_alpha(tokens)),
+            width: 1.0,
             radius: 8.0.into(),
         },
         shadow: Shadow::default(),
@@ -190,16 +190,16 @@ pub fn secondary_button(
 ) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
     move |_, status| {
         let bg = match status {
-            button::Status::Active => tokens.card,
-            button::Status::Hovered => tokens.card_hover,
-            button::Status::Pressed => tokens.divider,
-            button::Status::Disabled => with_alpha(tokens.card, 0.5),
+            button::Status::Active => mica_card_fill(tokens),
+            button::Status::Hovered => with_alpha(tokens.card_hover, mica_hover_alpha(tokens)),
+            button::Status::Pressed => with_alpha(tokens.divider, mica_pressed_alpha(tokens)),
+            button::Status::Disabled => with_alpha(tokens.card, 0.35),
         };
         button::Style {
             background: Some(Background::Color(bg)),
             text_color: tokens.text_primary,
             border: Border {
-                color: tokens.divider,
+                color: with_alpha(tokens.divider, mica_border_alpha(tokens)),
                 width: 1.0,
                 radius: 4.0.into(),
             },
@@ -245,6 +245,38 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
         b: b as f32 / 255.0,
         a: 1.0,
     }
+}
+
+const fn is_light(tokens: Tokens) -> bool {
+    tokens.background.r > 0.5
+}
+
+const fn mica_root_fill(tokens: Tokens) -> Color {
+    if is_light(tokens) {
+        with_alpha(tokens.background, 0.42)
+    } else {
+        with_alpha(tokens.background, 0.36)
+    }
+}
+
+const fn mica_card_fill(tokens: Tokens) -> Color {
+    if is_light(tokens) {
+        with_alpha(tokens.card, 0.68)
+    } else {
+        with_alpha(tokens.card, 0.58)
+    }
+}
+
+const fn mica_hover_alpha(tokens: Tokens) -> f32 {
+    if is_light(tokens) { 0.76 } else { 0.66 }
+}
+
+const fn mica_pressed_alpha(tokens: Tokens) -> f32 {
+    if is_light(tokens) { 0.70 } else { 0.62 }
+}
+
+const fn mica_border_alpha(tokens: Tokens) -> f32 {
+    if is_light(tokens) { 0.70 } else { 0.85 }
 }
 
 const fn with_alpha(color: Color, alpha: f32) -> Color {

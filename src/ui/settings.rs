@@ -18,17 +18,18 @@ use iced::{
     Alignment, Color, Element, Length, Pixels, Settings, Size, Subscription, Task, Theme, window,
 };
 use log::warn;
-use windows::Win32::Foundation::{HWND, SYSTEMTIME};
+use windows::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME};
 use windows::Win32::Graphics::Dwm::{
-    DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea,
-    DwmSetWindowAttribute,
+    DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Gdi::HRGN;
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-use windows::core::{BOOL, PCWSTR};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+};
+use windows::core::BOOL;
 
 use super::theme::{self, Mode, Tokens};
 use crate::config::Config;
@@ -52,6 +53,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 // giving up. The window normally exists within ~100 ms; 3 s is generous.
 const MICA_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 const MICA_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MICA_POST_CREATE_DELAY: Duration = Duration::from_millis(150);
 
 const WINDOW_ICON_BYTES: &[u8] = include_bytes!("../../assets/icon_active.ico");
 
@@ -75,10 +77,7 @@ pub enum Message {
 
 impl State {
     fn new(handle: Arc<RwLock<Config>>) -> Self {
-        let config = handle
-            .read()
-            .map(|cfg| cfg.clone())
-            .unwrap_or_default();
+        let config = handle.read().map(|cfg| cfg.clone()).unwrap_or_default();
         Self {
             config_handle: handle,
             config,
@@ -108,8 +107,7 @@ impl State {
             Message::OpenRepo => open_url(REPO_URL),
             Message::Close => return iced::exit(),
             Message::Tick => {
-                self.kakaotalk_running =
-                    process_watcher::find_kakaotalk_process().is_some();
+                self.kakaotalk_running = process_watcher::find_kakaotalk_process().is_some();
                 self.last_check = now_hhmm();
             }
         }
@@ -158,8 +156,7 @@ impl State {
         ]
         .spacing(2);
 
-        let ad_block_on =
-            self.config.ad_block_banner || self.config.ad_block_popup;
+        let ad_block_on = self.config.ad_block_banner || self.config.ad_block_popup;
         let ad_block = section(
             tokens,
             theme::ICON_SHIELD,
@@ -197,8 +194,7 @@ impl State {
             .into(),
         );
 
-        let blocking_active =
-            self.config.ad_block_banner || self.config.ad_block_popup;
+        let blocking_active = self.config.ad_block_banner || self.config.ad_block_popup;
         let status = section(
             tokens,
             theme::ICON_INFO,
@@ -207,13 +203,21 @@ impl State {
                 status_row(
                     tokens,
                     "카카오톡",
-                    if self.kakaotalk_running { "실행 중" } else { "미실행" },
+                    if self.kakaotalk_running {
+                        "실행 중"
+                    } else {
+                        "미실행"
+                    },
                     self.kakaotalk_running,
                 ),
                 status_row(
                     tokens,
                     "차단 상태",
-                    if blocking_active { "활성" } else { "비활성" },
+                    if blocking_active {
+                        "활성"
+                    } else {
+                        "비활성"
+                    },
                     blocking_active,
                 ),
                 status_text_row(tokens, "마지막 확인", &self.last_check),
@@ -375,11 +379,7 @@ fn status_row<'a>(
     .into()
 }
 
-fn status_text_row<'a>(
-    tokens: Tokens,
-    label: &'static str,
-    value: &str,
-) -> Element<'a, Message> {
+fn status_text_row<'a>(tokens: Tokens, label: &'static str, value: &str) -> Element<'a, Message> {
     row![
         text(label)
             .size(theme::BODY_SIZE)
@@ -472,6 +472,7 @@ fn open_url(url: &str) {
 /// / winit 0.30 require the EventLoop to live on the main thread on Windows).
 pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
     let mode = detect_system_mode();
+    force_settings_renderer();
     // iced exposes no way to grab the underlying HWND, so the Mica setup
     // thread waits for the window to appear by title and then talks to DWM
     // directly. Spawned before `iced::application().run_with(...)` because
@@ -540,6 +541,10 @@ fn spawn_mica_setup(title: &'static str, mode: Mode) {
                 warn!("settings: timed out waiting for window before applying Mica");
                 return;
             };
+            // winit applies its Windows-specific defaults during WM_CREATE,
+            // including `DWMSBT_AUTO`. Give it a moment to finish, then apply
+            // our explicit Mica backdrop.
+            thread::sleep(MICA_POST_CREATE_DELAY);
             apply_mica(hwnd, mode);
         })
         .map_err(|e| warn!("settings: failed to spawn Mica setup thread: {e}"))
@@ -547,16 +552,10 @@ fn spawn_mica_setup(title: &'static str, mode: Mode) {
 }
 
 fn wait_for_window(title: &str, timeout: Duration) -> Option<HWND> {
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let deadline = Instant::now() + timeout;
     loop {
-        // SAFETY: `wide` is a live UTF-16 buffer with a trailing NUL; passing
-        // a null class name is FindWindowW's documented "any class" sentinel.
-        let result = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(wide.as_ptr())) };
-        if let Ok(hwnd) = result {
-            if !hwnd.is_invalid() {
-                return Some(hwnd);
-            }
+        if let Some(hwnd) = find_own_top_level_window(title) {
+            return Some(hwnd);
         }
         if Instant::now() >= deadline {
             return None;
@@ -565,29 +564,53 @@ fn wait_for_window(title: &str, timeout: Duration) -> Option<HWND> {
     }
 }
 
+fn find_own_top_level_window(title: &str) -> Option<HWND> {
+    struct Ctx<'a> {
+        title: &'a str,
+        pid: u32,
+        hwnd: Option<HWND>,
+    }
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` points to the stack-local Ctx below. EnumWindows
+        // invokes this callback synchronously before the Ctx goes out of
+        // scope.
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx<'_>) };
+
+        let mut owner_pid = 0;
+        // SAFETY: `owner_pid` is a live stack u32 out-parameter.
+        let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
+        if owner_pid != ctx.pid || !is_window_visible(hwnd) {
+            return BOOL(1);
+        }
+
+        if window_text(hwnd) == ctx.title {
+            ctx.hwnd = Some(hwnd);
+            return BOOL(0);
+        }
+
+        BOOL(1)
+    }
+
+    let mut ctx = Ctx {
+        title,
+        // SAFETY: GetCurrentProcessId takes no parameters.
+        pid: unsafe { GetCurrentProcessId() },
+        hwnd: None,
+    };
+    let lparam = LPARAM(&mut ctx as *mut Ctx<'_> as isize);
+    // SAFETY: `ctx` outlives this synchronous EnumWindows call.
+    let _ = unsafe { EnumWindows(Some(collect), lparam) };
+    ctx.hwnd
+}
+
 fn apply_mica(hwnd: HWND, mode: Mode) {
     // SAFETY: `hwnd` is a live top-level window owned by this process. Each
     // DWM call takes a valid HWND and properly sized inputs.
     unsafe {
-        // (1) Undo winit's legacy Aero "blur behind". When
-        // `window::Settings::transparent = true`, winit calls
-        // DwmEnableBlurBehindWindow to engage DWM's transparent composition
-        // path. That path is mutually exclusive with the modern
-        // DWMWA_SYSTEMBACKDROP_TYPE (Win11 Mica): leaving it on makes DWM
-        // fall back to a solid white client area on Win11 22H2+.
-        let disable_blur = DWM_BLURBEHIND {
-            dwFlags: DWM_BB_ENABLE,
-            fEnable: BOOL(0),
-            hRgnBlur: HRGN::default(),
-            fTransitionOnMaximized: BOOL(0),
-        };
-        if let Err(e) = DwmEnableBlurBehindWindow(hwnd, &disable_blur) {
-            warn!("settings: DwmEnableBlurBehindWindow(off) failed: {e}");
-        }
-
-        // (2) Extend the glass frame across the entire client area so the
-        // Mica backdrop covers the whole window. Margins of (-1, -1, -1, -1)
-        // is the documented "extend to full window" sentinel.
+        // (1) Extend DWM's frame across the client area. Some Win32 render
+        // paths only show `DWMSBT_MAINWINDOW` behind the default frame unless
+        // the glass frame is explicitly extended into the client area.
         let margins = MARGINS {
             cxLeftWidth: -1,
             cxRightWidth: -1,
@@ -598,7 +621,7 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
             warn!("settings: DwmExtendFrameIntoClientArea failed: {e}");
         }
 
-        // (3) Sync the non-client (title bar + border) palette to the chosen
+        // (2) Sync the non-client (title bar + border) palette to the chosen
         // light/dark mode so it visually matches the Mica tint.
         let dark: i32 = match mode {
             Mode::Dark => 1,
@@ -613,7 +636,11 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
             warn!("settings: DWMWA_USE_IMMERSIVE_DARK_MODE failed: {e}");
         }
 
-        // (4) Engage Mica. Silently ignored on Windows < 22H2.
+        // (3) Engage Mica. `DWMSBT_MAINWINDOW` asks DWM to draw the backdrop
+        // behind the whole window bounds; iced's transparent clear color then
+        // lets that material show through the root container. Keep winit's
+        // blur-behind transparency enabled: disabling it makes the swapchain
+        // alpha get composed as an opaque light client area on some systems.
         let backdrop: i32 = DWMSBT_MAINWINDOW.0;
         if let Err(e) = DwmSetWindowAttribute(
             hwnd,
@@ -623,5 +650,34 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
         ) {
             warn!("settings: DWMWA_SYSTEMBACKDROP_TYPE failed: {e}");
         }
+    }
+}
+
+fn is_window_visible(hwnd: HWND) -> bool {
+    // SAFETY: IsWindowVisible accepts any HWND value.
+    unsafe { IsWindowVisible(hwnd) }.as_bool()
+}
+
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    // SAFETY: `buf` is a live stack array; GetWindowTextW writes at most
+    // buf.len() - 1 UTF-16 code units.
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
+    if len == 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len.min(buf.len())])
+}
+
+fn force_settings_renderer() {
+    // iced defaults to wgpu first. On Windows 11 this can produce an opaque
+    // swapchain even when the window and widgets are transparent, hiding the
+    // DWM Mica material. The settings window is simple enough that the
+    // software renderer is a better fit for reliable composition.
+    // SAFETY: This settings subprocess is still single-threaded here; no
+    // other Rust threads have been spawned and no concurrent environment
+    // access is happening.
+    unsafe {
+        std::env::set_var("ICED_BACKEND", "tiny-skia");
     }
 }
