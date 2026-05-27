@@ -23,7 +23,7 @@ impl Default for Config {
             ad_block_popup: true,
             auto_start: false,
             check_update: true,
-            poll_interval_ms: 500,
+            poll_interval_ms: 1000,
             startup_delay_ms: 1000,
             whitelist_keywords: [
                 "생일",
@@ -61,7 +61,11 @@ impl Config {
         if !path.exists() {
             let cfg = Self::default();
             if let Err(e) = cfg.save() {
-                warn!("failed to write default config to {}: {}", path.display(), e);
+                warn!(
+                    "failed to write default config to {}: {}",
+                    path.display(),
+                    e
+                );
             }
             return cfg;
         }
@@ -70,12 +74,20 @@ impl Config {
             Ok(contents) => match toml::from_str::<Config>(&contents) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    error!("failed to parse config {}: {} — using defaults", path.display(), e);
+                    error!(
+                        "failed to parse config {}: {} — using defaults",
+                        path.display(),
+                        e
+                    );
                     Self::default()
                 }
             },
             Err(e) => {
-                error!("failed to read config {}: {} — using defaults", path.display(), e);
+                error!(
+                    "failed to read config {}: {} — using defaults",
+                    path.display(),
+                    e
+                );
                 Self::default()
             }
         }
@@ -86,9 +98,8 @@ impl Config {
         std::fs::create_dir_all(&dir)?;
 
         let path = config_path();
-        let contents = toml::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let contents = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&path, contents)
     }
 }

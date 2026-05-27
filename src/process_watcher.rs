@@ -2,28 +2,30 @@
 
 use crate::config::Config;
 use log::{debug, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
-use windows::core::{PCWSTR, w};
 
 const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
+const MAIN_HWND_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAIN_HWND_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const STARTUP_APPLY_WINDOW: Duration = Duration::from_secs(5);
+const STARTUP_APPLY_INTERVAL: Duration = Duration::from_millis(500);
 
 type LifecycleCallback = Box<dyn FnMut() + Send + 'static>;
 type CallbackSlot = Arc<Mutex<Option<LifecycleCallback>>>;
 
 pub struct ProcessWatcher {
     poll_interval: Duration,
-    startup_delay: Duration,
     is_running: Arc<AtomicBool>,
     kakaotalk_pid: Arc<Mutex<Option<u32>>>,
     on_start: CallbackSlot,
@@ -31,10 +33,9 @@ pub struct ProcessWatcher {
 }
 
 impl ProcessWatcher {
-    pub fn new(poll_interval: Duration, startup_delay: Duration) -> Self {
+    pub fn new(poll_interval: Duration, _startup_delay: Duration) -> Self {
         Self {
             poll_interval,
-            startup_delay,
             is_running: Arc::new(AtomicBool::new(false)),
             kakaotalk_pid: Arc::new(Mutex::new(None)),
             on_start: Arc::new(Mutex::new(None)),
@@ -70,8 +71,8 @@ impl ProcessWatcher {
     }
 
     /// Register a callback fired when KakaoTalk transitions from "not running"
-    /// to "running". Runs on the watcher thread, after the startup grace
-    /// window has elapsed.
+    /// to "running". Runs on the watcher thread repeatedly during the startup
+    /// apply window so late-created ad surfaces are caught.
     pub fn on_kakaotalk_start<F>(&self, callback: F)
     where
         F: FnMut() + Send + 'static,
@@ -92,7 +93,6 @@ impl ProcessWatcher {
     pub fn start(self) -> JoinHandle<()> {
         let Self {
             poll_interval,
-            startup_delay,
             is_running,
             kakaotalk_pid,
             on_start,
@@ -113,23 +113,20 @@ impl ProcessWatcher {
 
                         // Fresh launch candidate. The PID may exist before the
                         // main window does (e.g. Windows logon launches this
-                        // app before KakaoTalk finishes startup), so do not
-                        // commit to "running" until the HWND is actually
-                        // there. The next poll will retry.
+                        // app before KakaoTalk finishes startup), so wait for
+                        // the HWND for a bounded window before committing to
+                        // "running".
                         (false, Some(pid)) => {
-                            if find_kakaotalk_main_hwnd(pid).is_some() {
-                                info!("KakaoTalk detected (pid={pid})");
+                            if wait_for_kakaotalk_main_hwnd(pid).is_some() {
+                                info!("KakaoTalk ready (pid={pid})");
                                 *kakaotalk_pid.lock().unwrap() = Some(pid);
                                 is_running.store(true, Ordering::Release);
 
-                                // Wait for KakaoTalk to finish creating its
-                                // internal ad surfaces. Scanning too early
-                                // misses late-spawned ad windows.
-                                thread::sleep(startup_delay);
-                                fire(&on_start);
+                                fire_startup_apply_window(&on_start);
                             } else {
                                 debug!(
-                                    "KakaoTalk pid {pid} present but main window not ready yet"
+                                    "KakaoTalk pid {pid} present but main window not ready within {:?}",
+                                    MAIN_HWND_WAIT_TIMEOUT
                                 );
                             }
                         }
@@ -154,10 +151,10 @@ impl ProcessWatcher {
                                 );
                                 fire(&on_stop);
 
-                                if find_kakaotalk_main_hwnd(pid).is_some() {
+                                if wait_for_kakaotalk_main_hwnd(pid).is_some() {
                                     *kakaotalk_pid.lock().unwrap() = Some(pid);
-                                    thread::sleep(startup_delay);
-                                    fire(&on_start);
+                                    is_running.store(true, Ordering::Release);
+                                    fire_startup_apply_window(&on_start);
                                 } else {
                                     *kakaotalk_pid.lock().unwrap() = None;
                                     is_running.store(false, Ordering::Release);
@@ -176,6 +173,40 @@ impl ProcessWatcher {
 fn fire(slot: &CallbackSlot) {
     if let Some(cb) = slot.lock().unwrap().as_mut() {
         cb();
+    }
+}
+
+fn fire_startup_apply_window(slot: &CallbackSlot) {
+    let deadline = Instant::now() + STARTUP_APPLY_WINDOW;
+    loop {
+        fire(slot);
+
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+
+        thread::sleep((deadline - now).min(STARTUP_APPLY_INTERVAL));
+    }
+}
+
+fn wait_for_kakaotalk_main_hwnd(pid: u32) -> Option<HWND> {
+    let deadline = Instant::now() + MAIN_HWND_WAIT_TIMEOUT;
+    loop {
+        if find_kakaotalk_process() != Some(pid) {
+            return None;
+        }
+
+        if let Some(hwnd) = find_kakaotalk_main_hwnd(pid) {
+            return Some(hwnd);
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+
+        thread::sleep((deadline - now).min(MAIN_HWND_RETRY_INTERVAL));
     }
 }
 
