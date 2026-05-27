@@ -9,8 +9,373 @@ mod tray;
 mod ui;
 mod updater;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::Duration;
+
+use adblocker::AdBlocker;
+use config::Config;
+use log::{error, info, warn};
+use process_watcher::ProcessWatcher;
+use semver::Version;
+use tray::{Tray, TrayEvent};
+use updater::Updater;
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, HWND,
+    WAIT_FAILED, WAIT_TIMEOUT,
+};
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
+};
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, FindWindowW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, QS_ALLINPUT, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage,
+    WM_QUIT,
+};
+use windows::core::{PCWSTR, w};
+
+const SINGLE_INSTANCE_MUTEX: PCWSTR = w!("CleanKakao");
+const RUN_REGISTRY_PATH: PCWSTR = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN_REGISTRY_VALUE: PCWSTR = w!("CleanKakao");
+const REAPPLY_INTERVAL: Duration = Duration::from_millis(2500);
+const MESSAGE_LOOP_WAIT_MS: u32 = 100;
+
 fn main() {
     env_logger::init();
 
-    // TODO: load config, spawn process watcher, build tray, run event loop.
+    let _single_instance = match SingleInstance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => {
+            error!("failed to create single-instance mutex: {e}");
+            return;
+        }
+    };
+
+    let loaded_config = Config::load();
+    if let Err(e) = sync_auto_start(loaded_config.auto_start) {
+        warn!("failed to sync auto-start registration: {e}");
+    }
+
+    let config = Arc::new(RwLock::new(loaded_config.clone()));
+    let blocking_enabled = Arc::new(AtomicBool::new(
+        loaded_config.ad_block_banner || loaded_config.ad_block_popup,
+    ));
+    let app_running = Arc::new(AtomicBool::new(true));
+    let adblocker = Arc::new(Mutex::new(AdBlocker::new(Arc::clone(&config))));
+
+    let (mut tray, tray_events) = match Tray::with_active(blocking_enabled.load(Ordering::Acquire))
+    {
+        Ok(tray) => tray,
+        Err(e) => {
+            error!("failed to initialize tray: {e}");
+            return;
+        }
+    };
+
+    let watcher = ProcessWatcher::from_config(&loaded_config);
+    let kakaotalk_running = watcher.is_running_handle();
+
+    {
+        let adblocker = Arc::clone(&adblocker);
+        let blocking_enabled = Arc::clone(&blocking_enabled);
+        watcher.on_kakaotalk_start(move || {
+            if blocking_enabled.load(Ordering::Acquire) {
+                apply_adblocker(&adblocker);
+            }
+        });
+    }
+
+    {
+        let adblocker = Arc::clone(&adblocker);
+        watcher.on_kakaotalk_stop(move || {
+            if let Ok(mut adblocker) = adblocker.lock() {
+                adblocker.reset();
+            }
+        });
+    }
+
+    let _process_watcher = watcher.start();
+    let _periodic_reapply = start_periodic_reapply_worker(
+        Arc::clone(&adblocker),
+        Arc::clone(&blocking_enabled),
+        Arc::clone(&kakaotalk_running),
+        Arc::clone(&app_running),
+    );
+
+    run_message_loop(
+        &tray_events,
+        &mut tray,
+        config,
+        adblocker,
+        blocking_enabled,
+        app_running,
+    );
+}
+
+struct SingleInstance(HANDLE);
+
+impl SingleInstance {
+    fn acquire() -> Result<Option<Self>, String> {
+        // SAFETY: We pass no security attributes, request initial ownership,
+        // and use a static null-terminated mutex name.
+        let handle = unsafe { CreateMutexW(None, true, SINGLE_INSTANCE_MUTEX) }
+            .map_err(|e| e.to_string())?;
+
+        // SAFETY: GetLastError has no preconditions and reports whether the
+        // named mutex already existed after CreateMutexW returned.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            focus_existing_instance();
+            // SAFETY: `handle` was returned by CreateMutexW above and is not
+            // used after this close.
+            let _ = unsafe { CloseHandle(handle) };
+            return Ok(None);
+        }
+
+        Ok(Some(Self(handle)))
+    }
+}
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        // SAFETY: The handle is owned by this guard and is closed exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn focus_existing_instance() {
+    // There may be no visible app window yet because CleanKakao primarily
+    // lives in the tray. This is a best-effort path for future settings UI.
+    // SAFETY: Both arguments are static or null PCWSTR values. FindWindowW
+    // does not mutate caller-owned memory.
+    let hwnd = unsafe { FindWindowW(PCWSTR::null(), w!("CleanKakao")) }.unwrap_or(HWND::default());
+    if hwnd.0.is_null() {
+        return;
+    }
+
+    // SAFETY: `hwnd` came from FindWindowW. Bringing it forward is best-effort.
+    let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+}
+
+fn start_periodic_reapply_worker(
+    adblocker: Arc<Mutex<AdBlocker>>,
+    blocking_enabled: Arc<AtomicBool>,
+    kakaotalk_running: Arc<AtomicBool>,
+    app_running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("adblocker-reapply".into())
+        .spawn(move || {
+            while app_running.load(Ordering::Acquire) {
+                if blocking_enabled.load(Ordering::Acquire)
+                    && kakaotalk_running.load(Ordering::Acquire)
+                {
+                    apply_adblocker(&adblocker);
+                }
+
+                thread::sleep(REAPPLY_INTERVAL);
+            }
+        })
+        .expect("failed to spawn adblocker-reapply thread")
+}
+
+fn run_message_loop(
+    tray_events: &Receiver<TrayEvent>,
+    tray: &mut Tray,
+    config: Arc<RwLock<Config>>,
+    adblocker: Arc<Mutex<AdBlocker>>,
+    blocking_enabled: Arc<AtomicBool>,
+    app_running: Arc<AtomicBool>,
+) {
+    let mut should_quit = false;
+
+    while !should_quit && app_running.load(Ordering::Acquire) {
+        drain_tray_events(
+            tray_events,
+            tray,
+            &config,
+            &adblocker,
+            &blocking_enabled,
+            &app_running,
+            &mut should_quit,
+        );
+
+        // SAFETY: We wait for any queued GUI message, with no object handles.
+        let wait =
+            unsafe { MsgWaitForMultipleObjects(None, false, MESSAGE_LOOP_WAIT_MS, QS_ALLINPUT) };
+        if wait == WAIT_FAILED {
+            warn!("MsgWaitForMultipleObjects failed");
+            break;
+        }
+
+        if wait == WAIT_TIMEOUT {
+            continue;
+        }
+
+        let mut message = MSG::default();
+        // SAFETY: `message` is a valid out pointer. We remove all messages
+        // for the current thread and dispatch them below.
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
+            if message.message == WM_QUIT {
+                should_quit = true;
+                break;
+            }
+
+            // SAFETY: `message` was produced by PeekMessageW for this thread.
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+        }
+    }
+
+    app_running.store(false, Ordering::Release);
+}
+
+fn drain_tray_events(
+    tray_events: &Receiver<TrayEvent>,
+    tray: &mut Tray,
+    config: &Arc<RwLock<Config>>,
+    adblocker: &Arc<Mutex<AdBlocker>>,
+    blocking_enabled: &Arc<AtomicBool>,
+    app_running: &Arc<AtomicBool>,
+    should_quit: &mut bool,
+) {
+    while let Ok(event) = tray_events.try_recv() {
+        match event {
+            TrayEvent::ToggleBlocking => {
+                let active = !blocking_enabled.load(Ordering::Acquire);
+                blocking_enabled.store(active, Ordering::Release);
+                if let Err(e) = tray.set_active(active) {
+                    warn!("failed to update tray state: {e}");
+                }
+
+                if active {
+                    apply_adblocker(adblocker);
+                } else {
+                    restore_adblocker(adblocker);
+                }
+            }
+            TrayEvent::OpenSettings => open_settings_window(Arc::clone(config)),
+            TrayEvent::CheckForUpdates => check_for_updates(),
+            TrayEvent::Quit => {
+                app_running.store(false, Ordering::Release);
+                restore_adblocker(adblocker);
+                *should_quit = true;
+                // SAFETY: Posts WM_QUIT to the current thread's message loop.
+                unsafe { PostQuitMessage(0) };
+            }
+        }
+    }
+}
+
+fn apply_adblocker(adblocker: &Arc<Mutex<AdBlocker>>) {
+    if let Ok(mut adblocker) = adblocker.lock() {
+        adblocker.apply_all();
+    }
+}
+
+fn restore_adblocker(adblocker: &Arc<Mutex<AdBlocker>>) {
+    if let Ok(mut adblocker) = adblocker.lock() {
+        adblocker.restore_all();
+    }
+}
+
+fn open_settings_window(config: Arc<RwLock<Config>>) {
+    thread::spawn(move || {
+        let config = config.read().unwrap().clone();
+        let _window_state = ui::settings::SettingsWindow::new(config);
+        info!("settings window requested; iced view is not wired yet");
+    });
+}
+
+fn check_for_updates() {
+    thread::spawn(|| {
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|e| {
+            warn!("failed to parse current version: {e}");
+            Version::new(0, 0, 0)
+        });
+
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!("failed to create tokio runtime for updater: {e}");
+                return;
+            }
+        };
+
+        let updater = Updater::new(current);
+        match runtime.block_on(updater.check()) {
+            Some(info) => info!("update available: {}", info.version),
+            None => info!("no update available"),
+        }
+    });
+}
+
+fn sync_auto_start(enabled: bool) -> Result<(), String> {
+    let key = open_run_registry_key()?;
+
+    let result = if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command = format!("\"{}\"", exe.display());
+        let wide = encode_wide_null(&command);
+        // SAFETY: `wide` is a live UTF-16 buffer with a trailing NUL. We
+        // expose its bytes only for the duration of RegSetValueExW.
+        let data =
+            unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+
+        // SAFETY: `key` is an open HKCU Run key. The value name is static
+        // UTF-16 and `data` points to a REG_SZ buffer including its NUL.
+        let status = unsafe { RegSetValueExW(key, RUN_REGISTRY_VALUE, None, REG_SZ, Some(data)) };
+        if status.is_ok() {
+            Ok(())
+        } else {
+            Err(format!("RegSetValueExW failed: {status:?}"))
+        }
+    } else {
+        // SAFETY: `key` is an open HKCU Run key and the value name is static.
+        let status = unsafe { RegDeleteValueW(key, RUN_REGISTRY_VALUE) };
+        if status.is_ok() || status == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!("RegDeleteValueW failed: {status:?}"))
+        }
+    };
+
+    // SAFETY: `key` was returned by RegCreateKeyExW and is not used after
+    // this close.
+    let _ = unsafe { RegCloseKey(key) };
+    result
+}
+
+fn open_run_registry_key() -> Result<HKEY, String> {
+    let mut key = HKEY::default();
+    // SAFETY: We create/open the current user's Run key with set-value
+    // access. `key` is a valid out pointer for the returned HKEY.
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            RUN_REGISTRY_PATH,
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut key,
+            None,
+        )
+    };
+
+    if status.is_ok() {
+        Ok(key)
+    } else {
+        Err(format!("RegCreateKeyExW failed: {status:?}"))
+    }
+}
+
+fn encode_wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }

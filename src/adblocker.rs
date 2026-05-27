@@ -102,6 +102,12 @@ pub struct AdBlocker {
     original: HashMap<isize, WindowState>,
 }
 
+// SAFETY: HWND values are opaque Win32 handles that may be passed between
+// threads. AdBlocker mutates its cached handles and restore state only through
+// external synchronization (`Mutex<AdBlocker>` in main), so moving it to the
+// watcher/reapply worker threads is sound.
+unsafe impl Send for AdBlocker {}
+
 impl AdBlocker {
     pub fn new(config: Arc<RwLock<Config>>) -> Self {
         Self {
