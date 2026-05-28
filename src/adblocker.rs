@@ -755,6 +755,40 @@ fn process_image_is(pid: u32, target_exe: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bottom_banner_rect_matches_expected_geometry() {
+        let main = rect(100, 100, 700, 900);
+        let banner = rect(120, 809, 680, 900);
+
+        assert!(is_bottom_banner_rect(&main, &banner));
+    }
+
+    #[test]
+    fn bottom_banner_rect_allows_small_height_and_bottom_tolerance() {
+        let main = rect(0, 0, 600, 800);
+
+        assert!(is_bottom_banner_rect(&main, &rect(0, 707, 600, 798)));
+        assert!(is_bottom_banner_rect(&main, &rect(0, 709, 600, 802)));
+    }
+
+    #[test]
+    fn bottom_banner_rect_rejects_wrong_height_bottom_or_width() {
+        let main = rect(0, 0, 600, 800);
+
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 700, 600, 800)));
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 709, 600, 780)));
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 709, 419, 800)));
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
     /// Ignored by default; meaningful only when KakaoTalk is running on the
     /// host. Run with:
     ///     cargo test -- --ignored --nocapture adblocker_live

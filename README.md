@@ -47,6 +47,14 @@ cargo run
 cargo build --release --target x86_64-pc-windows-msvc
 ```
 
+테스트:
+
+```powershell
+cargo test
+```
+
+자동 테스트는 설정 저장/로드, 업데이트 판정, ICO 파싱, 광고 영역 geometry처럼 순수 로직 위주로 검증합니다. 실제 KakaoTalk 창 계층과 WinEvent/Win32 조작은 환경 의존성이 커서 ignored live smoke test와 실환경 확인으로 다룹니다.
+
 태그를 푸시하면 GitHub Actions가 Windows 릴리스 빌드를 만들고 zip 파일을 GitHub Release에 업로드합니다.
 
 ```powershell

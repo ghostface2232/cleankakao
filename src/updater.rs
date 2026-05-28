@@ -103,36 +103,7 @@ impl UpdateChecker {
             }
         };
 
-        let tag = latest.tag_name.trim_start_matches(['v', 'V']);
-        let version = match Version::parse(tag) {
-            Ok(version) => version,
-            Err(e) => {
-                warn!(
-                    "failed to parse latest release tag '{}': {e}",
-                    latest.tag_name
-                );
-                return None;
-            }
-        };
-
-        if version <= self.current_version {
-            debug!(
-                "no update available: current={}, latest={}",
-                self.current_version, version
-            );
-            return None;
-        }
-
-        Some(ReleaseInfo {
-            version,
-            download_url: if latest.html_url.is_empty() {
-                RELEASES_URL.to_string()
-            } else {
-                latest.html_url
-            },
-            release_notes: latest.body.unwrap_or_default(),
-            published_at: latest.published_at.unwrap_or_default(),
-        })
+        parse_release_info(latest, &self.current_version)
     }
 
     pub fn notify_update(&self, info: &ReleaseInfo) {
@@ -237,6 +208,39 @@ fn show_windows_toast(title: &str, body: &str, launch_url: &str) -> windows::cor
     notifier.Show(&toast)
 }
 
+fn parse_release_info(latest: GitHubRelease, current_version: &Version) -> Option<ReleaseInfo> {
+    let tag = latest.tag_name.trim_start_matches(['v', 'V']);
+    let version = match Version::parse(tag) {
+        Ok(version) => version,
+        Err(e) => {
+            warn!(
+                "failed to parse latest release tag '{}': {e}",
+                latest.tag_name
+            );
+            return None;
+        }
+    };
+
+    if version <= *current_version {
+        debug!(
+            "no update available: current={}, latest={}",
+            current_version, version
+        );
+        return None;
+    }
+
+    Some(ReleaseInfo {
+        version,
+        download_url: if latest.html_url.is_empty() {
+            RELEASES_URL.to_string()
+        } else {
+            latest.html_url
+        },
+        release_notes: latest.body.unwrap_or_default(),
+        published_at: latest.published_at.unwrap_or_default(),
+    })
+}
+
 fn release_note_preview(release_notes: &str) -> String {
     release_notes
         .lines()
@@ -261,4 +265,79 @@ fn escape_xml(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_newer_release_info() {
+        let info = parse_release_info(
+            GitHubRelease {
+                tag_name: "v1.2.3".to_string(),
+                html_url: "https://example.test/release".to_string(),
+                body: Some("notes".to_string()),
+                published_at: Some("2026-05-28T00:00:00Z".to_string()),
+            },
+            &Version::parse("1.2.2").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(info.version, Version::parse("1.2.3").unwrap());
+        assert_eq!(info.download_url, "https://example.test/release");
+        assert_eq!(info.release_notes, "notes");
+        assert_eq!(info.published_at, "2026-05-28T00:00:00Z");
+    }
+
+    #[test]
+    fn ignores_same_or_older_release() {
+        let current = Version::parse("1.2.3").unwrap();
+
+        assert!(parse_release_info(release("1.2.3"), &current).is_none());
+        assert!(parse_release_info(release("1.2.2"), &current).is_none());
+    }
+
+    #[test]
+    fn ignores_invalid_release_tag() {
+        assert!(parse_release_info(release("latest"), &Version::parse("1.0.0").unwrap()).is_none());
+    }
+
+    #[test]
+    fn falls_back_to_releases_url_when_html_url_is_empty() {
+        let mut release = release("1.0.1");
+        release.html_url.clear();
+
+        let info = parse_release_info(release, &Version::parse("1.0.0").unwrap()).unwrap();
+
+        assert_eq!(info.download_url, RELEASES_URL);
+    }
+
+    #[test]
+    fn previews_first_non_empty_release_note_line() {
+        assert_eq!(
+            release_note_preview("\n  \n  First line\nSecond line"),
+            "First line"
+        );
+
+        let long = "a".repeat(120);
+        assert_eq!(release_note_preview(&long).chars().count(), 90);
+    }
+
+    #[test]
+    fn escapes_xml_special_characters() {
+        assert_eq!(
+            escape_xml("<tag a=\"b\">Tom & 'Jerry'</tag>"),
+            "&lt;tag a=&quot;b&quot;&gt;Tom &amp; &apos;Jerry&apos;&lt;/tag&gt;"
+        );
+    }
+
+    fn release(tag_name: &str) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag_name.to_string(),
+            html_url: "https://example.test/release".to_string(),
+            body: None,
+            published_at: None,
+        }
+    }
 }
