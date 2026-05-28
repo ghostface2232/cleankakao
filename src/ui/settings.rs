@@ -50,6 +50,9 @@ const PILL_WIDTH: f32 = 42.0;
 const PILL_HEIGHT: f32 = 22.0;
 const PILL_THUMB: f32 = 16.0;
 const PILL_PAD: u16 = ((PILL_HEIGHT - PILL_THUMB) / 2.0) as u16;
+const PILL_TRAVEL: f32 = PILL_WIDTH - PILL_THUMB - (PILL_PAD as f32 * 2.0);
+const TOGGLE_ANIMATION_SPEED: f32 = 14.0;
+const ANIMATION_TICK: Duration = Duration::from_millis(16);
 const STATUS_TICK: Duration = Duration::from_secs(1);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const LOGO_SIZE: f32 = 90.0;
@@ -70,6 +73,7 @@ pub struct State {
     mode: Mode,
     kakaotalk_running: bool,
     last_check: String,
+    toggle_animation: ToggleAnimation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,18 +83,23 @@ pub enum Message {
     ToggleCheckUpdate(bool),
     OpenRepo,
     Close,
-    Tick,
+    StatusTick,
+    AnimationTick(Instant),
 }
 
 impl State {
     fn new(handle: Arc<RwLock<Config>>) -> Self {
         let config = handle.read().map(|cfg| cfg.clone()).unwrap_or_default();
+        let ad_block_on = config.ad_block_banner || config.ad_block_popup;
+        let auto_start = config.auto_start;
+        let check_update = config.check_update;
         Self {
             config_handle: handle,
             config,
             mode: detect_system_mode(),
             kakaotalk_running: process_watcher::find_kakaotalk_process().is_some(),
             last_check: now_hhmm(),
+            toggle_animation: ToggleAnimation::new(ad_block_on, auto_start, check_update),
         }
     }
 
@@ -101,21 +110,27 @@ impl State {
                 // to keep one kind of ad and not the other.
                 self.config.ad_block_banner = v;
                 self.config.ad_block_popup = v;
+                self.toggle_animation.ad_block.set_target(v);
                 self.persist();
             }
             Message::ToggleAutoStart(v) => {
                 self.config.auto_start = v;
+                self.toggle_animation.auto_start.set_target(v);
                 self.persist();
             }
             Message::ToggleCheckUpdate(v) => {
                 self.config.check_update = v;
+                self.toggle_animation.check_update.set_target(v);
                 self.persist();
             }
             Message::OpenRepo => open_url(REPO_URL),
             Message::Close => return iced::exit(),
-            Message::Tick => {
+            Message::StatusTick => {
                 self.kakaotalk_running = process_watcher::find_kakaotalk_process().is_some();
                 self.last_check = now_hhmm();
+            }
+            Message::AnimationTick(now) => {
+                self.toggle_animation.update(now);
             }
         }
         Task::none()
@@ -146,7 +161,10 @@ impl State {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(STATUS_TICK).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(STATUS_TICK).map(|_| Message::StatusTick),
+            iced::time::every(ANIMATION_TICK).map(Message::AnimationTick),
+        ])
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -187,6 +205,7 @@ impl State {
                 theme::ICON_EYE_OFF,
                 "배너 · 팝업 광고 숨기기",
                 ad_block_on,
+                self.toggle_animation.ad_block.progress,
                 Message::ToggleAdBlock,
             ),
         );
@@ -201,6 +220,7 @@ impl State {
                     theme::ICON_ROCKET,
                     "Windows 시작 시 실행",
                     self.config.auto_start,
+                    self.toggle_animation.auto_start.progress,
                     Message::ToggleAutoStart,
                 ),
                 toggle_row(
@@ -208,6 +228,7 @@ impl State {
                     theme::ICON_ARROW_SYNC,
                     "자동 업데이트 확인",
                     self.config.check_update,
+                    self.toggle_animation.check_update.progress,
                     Message::ToggleCheckUpdate,
                 ),
             ]
@@ -215,7 +236,6 @@ impl State {
             .into(),
         );
 
-        let blocking_active = self.config.ad_block_banner || self.config.ad_block_popup;
         let status = section(
             tokens,
             theme::ICON_INFO,
@@ -230,16 +250,6 @@ impl State {
                         "미실행"
                     },
                     self.kakaotalk_running,
-                ),
-                status_row(
-                    tokens,
-                    "차단 상태",
-                    if blocking_active {
-                        "활성"
-                    } else {
-                        "비활성"
-                    },
-                    blocking_active,
                 ),
                 status_text_row(tokens, "마지막 확인", &self.last_check),
             ]
@@ -314,6 +324,7 @@ fn toggle_row<'a>(
     icon: &'static str,
     label: &'static str,
     value: bool,
+    progress: f32,
     to_message: fn(bool) -> Message,
 ) -> Element<'a, Message> {
     row![
@@ -325,7 +336,7 @@ fn toggle_row<'a>(
             .size(theme::BODY_SIZE)
             .color(tokens.text_primary)
             .width(Length::Fill),
-        pill_toggle(tokens, value, to_message),
+        pill_toggle(tokens, value, progress, to_message),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
@@ -339,6 +350,7 @@ fn toggle_row<'a>(
 fn pill_toggle<'a>(
     tokens: Tokens,
     value: bool,
+    progress: f32,
     to_message: fn(bool) -> Message,
 ) -> Element<'a, Message> {
     let thumb = container(Space::new(0.0, 0.0))
@@ -346,21 +358,81 @@ fn pill_toggle<'a>(
         .height(Length::Fixed(PILL_THUMB))
         .style(theme::pill_thumb(PILL_THUMB));
 
-    let thumb_alignment = if value {
-        alignment::Horizontal::Right
-    } else {
-        alignment::Horizontal::Left
-    };
+    let thumb_offset = PILL_TRAVEL * progress.clamp(0.0, 1.0);
+    let thumb_row = row![Space::with_width(Length::Fixed(thumb_offset)), thumb];
 
-    let track = container(thumb)
+    let track = container(thumb_row)
         .width(Length::Fixed(PILL_WIDTH))
         .height(Length::Fixed(PILL_HEIGHT))
         .padding([0u16, PILL_PAD])
-        .align_x(thumb_alignment)
+        .align_x(alignment::Horizontal::Left)
         .align_y(alignment::Vertical::Center)
         .style(theme::pill_track(tokens, value, PILL_HEIGHT));
 
     mouse_area(track).on_press(to_message(!value)).into()
+}
+
+struct ToggleAnimation {
+    ad_block: AnimatedToggle,
+    auto_start: AnimatedToggle,
+    check_update: AnimatedToggle,
+    last_frame: Option<Instant>,
+}
+
+impl ToggleAnimation {
+    fn new(ad_block: bool, auto_start: bool, check_update: bool) -> Self {
+        Self {
+            ad_block: AnimatedToggle::new(ad_block),
+            auto_start: AnimatedToggle::new(auto_start),
+            check_update: AnimatedToggle::new(check_update),
+            last_frame: None,
+        }
+    }
+
+    fn update(&mut self, now: Instant) {
+        let dt = self
+            .last_frame
+            .map(|last| now.saturating_duration_since(last).as_secs_f32())
+            .unwrap_or_default()
+            .min(0.05);
+        self.last_frame = Some(now);
+
+        self.ad_block.update(dt);
+        self.auto_start.update(dt);
+        self.check_update.update(dt);
+    }
+}
+
+struct AnimatedToggle {
+    progress: f32,
+    target: f32,
+}
+
+impl AnimatedToggle {
+    fn new(value: bool) -> Self {
+        let progress = f32::from(value);
+        Self {
+            progress,
+            target: progress,
+        }
+    }
+
+    fn set_target(&mut self, value: bool) {
+        self.target = f32::from(value);
+    }
+
+    fn update(&mut self, dt: f32) {
+        if (self.progress - self.target).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let step = TOGGLE_ANIMATION_SPEED * dt;
+        if self.progress < self.target {
+            self.progress = (self.progress + step).min(self.target);
+        } else {
+            self.progress = (self.progress - step).max(self.target);
+        }
+    }
 }
 
 fn status_row<'a>(

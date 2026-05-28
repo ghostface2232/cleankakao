@@ -19,7 +19,7 @@ const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
 const MAIN_HWND_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAIN_HWND_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_APPLY_WINDOW: Duration = Duration::from_secs(5);
-const STARTUP_APPLY_INTERVAL: Duration = Duration::from_millis(500);
+const STARTUP_APPLY_INTERVAL: Duration = Duration::from_millis(100);
 
 type LifecycleCallback = Box<dyn FnMut() + Send + 'static>;
 type CallbackSlot = Arc<Mutex<Option<LifecycleCallback>>>;

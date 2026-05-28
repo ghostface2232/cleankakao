@@ -4,9 +4,8 @@
 // 0.30 require the EventLoop to live on the host's main thread on Windows,
 // and our main thread is already committed to the tray's Win32 message loop.
 // The child writes config changes straight to
-// `%LocalAppData%\cleankakao\config.toml`; when it exits, the tray reloads
-// that file so the live `AdBlocker` picks up the new values without an app
-// restart.
+// `%LocalAppData%\cleankakao\config.toml`; the tray process watches that file
+// and applies changes while the settings window is still open.
 
 pub mod settings;
 pub mod theme;
@@ -59,9 +58,10 @@ pub fn open_settings_window(config: Arc<RwLock<Config>>) {
                 warn!("settings: child wait failed: {e}");
             }
 
-            // The child persisted every toggle straight to disk. Reload the
-            // file into the shared handle so the running AdBlocker sees the
-            // new values immediately (it re-reads on every apply cycle).
+            // The tray process also watches config changes while the window
+            // is open. This final reload covers the quiet path where the user
+            // closes settings without changing anything after a transient
+            // file read failed.
             let reloaded = Config::load();
             match config.write() {
                 Ok(mut shared) => *shared = reloaded,

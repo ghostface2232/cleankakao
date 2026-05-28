@@ -3,3 +3,6 @@
 # Local build assets — fetched via `assets/fetch.ps1` or supplied by hand.
 /assets/fonts/
 /assets/*.ico
+
+# Local reference checkouts.
+/ref/

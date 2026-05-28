@@ -8,9 +8,10 @@ mod process_watcher;
 mod tray;
 mod ui;
 mod updater;
+mod window_events;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -41,7 +42,8 @@ use windows::core::{PCWSTR, w};
 const SINGLE_INSTANCE_MUTEX: PCWSTR = w!("CleanKakao");
 const RUN_REGISTRY_PATH: PCWSTR = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_REGISTRY_VALUE: PCWSTR = w!("CleanKakao");
-const REAPPLY_INTERVAL: Duration = Duration::from_millis(2500);
+const REAPPLY_INTERVAL: Duration = Duration::from_millis(1000);
+const CONFIG_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
 const MESSAGE_LOOP_WAIT_MS: u32 = 100;
 pub const SETTINGS_SUBPROCESS_FLAG: &str = "--settings";
 
@@ -77,6 +79,7 @@ fn main() {
     ));
     let app_running = Arc::new(AtomicBool::new(true));
     let adblocker = Arc::new(Mutex::new(AdBlocker::new(Arc::clone(&config))));
+    let (config_updates, config_update_events) = channel();
 
     let (mut tray, tray_events) = match Tray::with_active(blocking_enabled.load(Ordering::Acquire))
     {
@@ -89,6 +92,7 @@ fn main() {
 
     let watcher = ProcessWatcher::from_config(&loaded_config);
     let kakaotalk_running = watcher.is_running_handle();
+    let kakaotalk_pid = watcher.pid_handle();
 
     {
         let adblocker = Arc::clone(&adblocker);
@@ -116,9 +120,19 @@ fn main() {
         Arc::clone(&kakaotalk_running),
         Arc::clone(&app_running),
     );
+    let _window_event_reapply = window_events::start_reapply_worker(
+        Arc::clone(&adblocker),
+        Arc::clone(&blocking_enabled),
+        Arc::clone(&kakaotalk_running),
+        Arc::clone(&kakaotalk_pid),
+        Arc::clone(&app_running),
+    );
+    let _config_reload_worker =
+        start_config_reload_worker(loaded_config, config_updates, Arc::clone(&app_running));
 
     run_message_loop(
         &tray_events,
+        &config_update_events,
         &mut tray,
         config,
         adblocker,
@@ -194,8 +208,33 @@ fn start_periodic_reapply_worker(
         .expect("failed to spawn adblocker-reapply thread")
 }
 
+fn start_config_reload_worker(
+    initial_config: Config,
+    updates: Sender<Config>,
+    app_running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("config-reload".into())
+        .spawn(move || {
+            let mut last = initial_config;
+            while app_running.load(Ordering::Acquire) {
+                thread::sleep(CONFIG_RELOAD_INTERVAL);
+
+                let current = Config::load();
+                if current != last {
+                    last = current.clone();
+                    if updates.send(current).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn config-reload thread")
+}
+
 fn run_message_loop(
     tray_events: &Receiver<TrayEvent>,
+    config_updates: &Receiver<Config>,
     tray: &mut Tray,
     config: Arc<RwLock<Config>>,
     adblocker: Arc<Mutex<AdBlocker>>,
@@ -214,6 +253,7 @@ fn run_message_loop(
             &app_running,
             &mut should_quit,
         );
+        drain_config_updates(config_updates, tray, &config, &adblocker, &blocking_enabled);
 
         // SAFETY: We wait for any queued GUI message, with no object handles.
         let wait =
@@ -243,6 +283,51 @@ fn run_message_loop(
     }
 
     app_running.store(false, Ordering::Release);
+}
+
+fn drain_config_updates(
+    config_updates: &Receiver<Config>,
+    tray: &mut Tray,
+    config: &Arc<RwLock<Config>>,
+    adblocker: &Arc<Mutex<AdBlocker>>,
+    blocking_enabled: &Arc<AtomicBool>,
+) {
+    while let Ok(reloaded) = config_updates.try_recv() {
+        let previous = match config.write() {
+            Ok(mut shared) => {
+                let previous = shared.clone();
+                *shared = reloaded.clone();
+                previous
+            }
+            Err(e) => {
+                warn!("failed to update shared config: {e}");
+                continue;
+            }
+        };
+
+        if previous.auto_start != reloaded.auto_start {
+            if let Err(e) = sync_auto_start(reloaded.auto_start) {
+                warn!("failed to sync auto-start registration: {e}");
+            }
+        }
+
+        let was_configured_active = previous.ad_block_banner || previous.ad_block_popup;
+        let is_configured_active = reloaded.ad_block_banner || reloaded.ad_block_popup;
+        if was_configured_active != is_configured_active {
+            blocking_enabled.store(is_configured_active, Ordering::Release);
+            if let Err(e) = tray.set_active(is_configured_active) {
+                warn!("failed to update tray state: {e}");
+            }
+
+            if is_configured_active {
+                apply_adblocker(adblocker);
+            } else {
+                restore_adblocker(adblocker);
+            }
+        } else if is_configured_active && blocking_enabled.load(Ordering::Acquire) {
+            apply_adblocker(adblocker);
+        }
+    }
 }
 
 fn drain_tray_events(
