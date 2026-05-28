@@ -1,8 +1,8 @@
 /target
-
-# Local build assets — fetched via `assets/fetch.ps1` or supplied by hand.
-/assets/fonts/
-/assets/*.ico
+/dist/
+*.zip
+*.pdb
+*.msi
 
 # Local reference checkouts.
 /ref/

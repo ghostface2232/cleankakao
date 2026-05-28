@@ -1,6 +1,7 @@
 # Assets
 
-Place the following files here before building a release:
+The release build embeds these assets at compile time, so they are part of the
+repository:
 
 - `icon_active.ico` — tray icon shown when blocking is enabled. Final design TBD; use any 256x256 ICO as a temporary stand-in during development.
 - `icon_inactive.ico` — tray icon shown when blocking is disabled. Same temporary-icon note as above.
@@ -8,9 +9,7 @@ Place the following files here before building a release:
 - `fonts/PretendardJP-Medium.otf` — settings-window body font.
 - `fonts/PretendardJP-SemiBold.otf` — settings-window heading font.
 
-These files are intentionally not committed; fetch or supply them locally.
-
-## Fetching the font
+## Refreshing the Fluent icon font
 
 Run from the repo root:
 

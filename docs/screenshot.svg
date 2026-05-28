@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-label="CleanKakao settings window screenshot placeholder">
+  <rect width="1200" height="760" fill="#f4f6f8"/>
+  <rect x="260" y="90" width="680" height="580" rx="16" fill="#ffffff" stroke="#d7dde3"/>
+  <rect x="260" y="90" width="680" height="64" rx="16" fill="#f8fafc"/>
+  <text x="302" y="132" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600" fill="#1f2937">CleanKakao</text>
+  <text x="302" y="203" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#4b5563">광고 차단</text>
+  <rect x="302" y="226" width="596" height="78" rx="10" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="332" y="259" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#111827">배너 광고 숨기기</text>
+  <text x="332" y="283" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6b7280">KakaoTalk 메인 창 하단 광고 영역을 숨깁니다.</text>
+  <rect x="810" y="248" width="58" height="32" rx="16" fill="#2563eb"/>
+  <circle cx="852" cy="264" r="13" fill="#ffffff"/>
+  <rect x="302" y="318" width="596" height="78" rx="10" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="332" y="351" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#111827">팝업 광고 숨기기</text>
+  <text x="332" y="375" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6b7280">광고성 팝업 창을 감지하면 숨깁니다.</text>
+  <rect x="810" y="340" width="58" height="32" rx="16" fill="#2563eb"/>
+  <circle cx="852" cy="356" r="13" fill="#ffffff"/>
+  <text x="302" y="457" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#4b5563">앱 설정</text>
+  <rect x="302" y="480" width="596" height="78" rx="10" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="332" y="513" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#111827">Windows 시작 시 실행</text>
+  <text x="332" y="537" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6b7280">로그인 후 CleanKakao를 자동으로 시작합니다.</text>
+  <rect x="810" y="502" width="58" height="32" rx="16" fill="#d1d5db"/>
+  <circle cx="826" cy="518" r="13" fill="#ffffff"/>
+  <rect x="302" y="572" width="596" height="78" rx="10" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="332" y="605" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#111827">업데이트 확인</text>
+  <text x="332" y="629" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6b7280">GitHub Releases에서 새 버전을 확인합니다.</text>
+  <rect x="810" y="594" width="58" height="32" rx="16" fill="#2563eb"/>
+  <circle cx="852" cy="610" r="13" fill="#ffffff"/>
+</svg>

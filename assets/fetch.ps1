@@ -1,4 +1,4 @@
-# Download local-only assets that are intentionally not committed.
+# Refresh third-party assets used by the UI.
 # Run from anywhere: powershell -ExecutionPolicy Bypass -File assets\fetch.ps1
 
 $ErrorActionPreference = 'Stop'

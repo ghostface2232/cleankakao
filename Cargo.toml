@@ -2,6 +2,9 @@
 name = "cleankakao"
 version = "0.1.0"
 edition = "2024"
+description = "KakaoTalk PC ad-blocking system tray app for Windows"
+license = "MIT"
+repository = "https://github.com/ghostface2232/cleankakao"
 
 [dependencies]
 windows = { version = ">=0.59, <=0.62", features = [
@@ -32,6 +35,9 @@ semver = "1"
 log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["ico", "png", "bmp"] }
+
+[build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = "z"

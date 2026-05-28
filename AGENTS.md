@@ -22,7 +22,7 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 - **Settings window UI**: `iced` v0.13 with a custom WinUI3 theme.
 - **Settings storage**: `serde` v1 + `toml` v0.8.
 - **Automatic updates**: `reqwest` v0.12 against the GitHub Releases API. Current behavior checks the latest release, shows a Windows toast notification, and opens the GitHub Releases page from the toast; it does not self-replace the executable.
-- **Build / deployment**: `cargo`; release automation/distribution is not wired yet.
+- **Build / deployment**: `cargo` + `winres` for Windows executable metadata + GitHub Actions tag releases.
 
 ## Project Layout
 - `src/main.rs` — entry point, tray + event loop, `#![windows_subsystem = "windows"]` so release builds have no console.
@@ -35,7 +35,9 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
   - `settings.rs` — window state + `Message` enum.
   - `theme.rs` — custom WinUI3-style theme.
 - `src/updater.rs` — GitHub Releases update check, periodic update worker, and Windows toast notification.
-- `assets/` — `icon_active.ico`, `icon_inactive.ico`, and fonts under `assets/fonts/` (`FluentSystemIcons-Regular.ttf`, `PretendardJP-Medium.otf`, `PretendardJP-SemiBold.otf`). Not committed; see `assets/README.md`.
+- `build.rs` — embeds Windows executable resources such as icon and version metadata.
+- `.github/workflows/release.yml` — tag-triggered Windows release build and GitHub Release asset upload.
+- `assets/` — build-time embedded icons and fonts: `icon_active.ico`, `icon_inactive.ico`, `fonts/FluentSystemIcons-Regular.ttf`, `fonts/PretendardJP-Medium.otf`, and `fonts/PretendardJP-SemiBold.otf`.
 
 ## Build & Run
 - Dev: `cargo run`
