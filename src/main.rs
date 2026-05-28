@@ -20,9 +20,8 @@ use adblocker::AdBlocker;
 use config::Config;
 use log::{error, info, warn};
 use process_watcher::ProcessWatcher;
-use semver::Version;
 use tray::{Tray, TrayEvent};
-use updater::Updater;
+use updater::{DEFAULT_UPDATE_CHECK_INTERVAL, UpdateChecker};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, HWND,
     WAIT_FAILED, WAIT_TIMEOUT,
@@ -129,6 +128,11 @@ fn main() {
     );
     let _config_reload_worker =
         start_config_reload_worker(loaded_config, config_updates, Arc::clone(&app_running));
+    let _update_checker = UpdateChecker::current().start_periodic_check(
+        DEFAULT_UPDATE_CHECK_INTERVAL,
+        Arc::clone(&config),
+        Arc::clone(&app_running),
+    );
 
     run_message_loop(
         &tray_events,
@@ -388,11 +392,6 @@ fn run_settings_subprocess() {
 
 fn check_for_updates() {
     thread::spawn(|| {
-        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|e| {
-            warn!("failed to parse current version: {e}");
-            Version::new(0, 0, 0)
-        });
-
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime,
             Err(e) => {
@@ -401,10 +400,12 @@ fn check_for_updates() {
             }
         };
 
-        let updater = Updater::new(current);
-        match runtime.block_on(updater.check()) {
-            Some(info) => info!("update available: {}", info.version),
-            None => info!("no update available"),
+        let updater = UpdateChecker::current();
+        if let Some(info) = runtime.block_on(updater.check_latest_version()) {
+            info!("update available: {}", info.version);
+            updater.notify_update(&info);
+        } else {
+            info!("no update available");
         }
     });
 }

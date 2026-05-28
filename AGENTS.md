@@ -21,7 +21,7 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 - **System tray**: `tray-icon` v0.21 + `muda` v0.17 (context menu).
 - **Settings window UI**: `iced` v0.13 with a custom WinUI3 theme.
 - **Settings storage**: `serde` v1 + `toml` v0.8.
-- **Automatic updates**: `reqwest` v0.12 dependency is present, but `updater` is currently a stub/TODO.
+- **Automatic updates**: `reqwest` v0.12 against the GitHub Releases API. Current behavior checks the latest release, shows a Windows toast notification, and opens the GitHub Releases page from the toast; it does not self-replace the executable.
 - **Build / deployment**: `cargo`; release automation/distribution is not wired yet.
 
 ## Project Layout
@@ -34,7 +34,7 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 - `src/ui/` — iced settings window.
   - `settings.rs` — window state + `Message` enum.
   - `theme.rs` — custom WinUI3-style theme.
-- `src/updater.rs` — placeholder release manifest check + self-update API.
+- `src/updater.rs` — GitHub Releases update check, periodic update worker, and Windows toast notification.
 - `assets/` — `icon_active.ico`, `icon_inactive.ico`, and fonts under `assets/fonts/` (`FluentSystemIcons-Regular.ttf`, `PretendardJP-Medium.otf`, `PretendardJP-SemiBold.otf`). Not committed; see `assets/README.md`.
 
 ## Build & Run

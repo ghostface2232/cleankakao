@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 windows = { version = ">=0.59, <=0.62", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
