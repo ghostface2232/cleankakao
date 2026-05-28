@@ -18,14 +18,13 @@ use windows::Win32::Graphics::Gdi::{
     RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetClassNameW, GetParent,
-    GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOP, IsIconic,
-    IsWindow, IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SetWindowPos, ShowWindow, WS_POPUP,
+    EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetClassNameW,
+    GetParent, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOP,
+    IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOZORDER, SetWindowPos, ShowWindow, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -268,13 +267,7 @@ impl AdBlocker {
         out
     }
 
-    fn is_direct_banner_slot(
-        &self,
-        main: HWND,
-        child: HWND,
-        pid: u32,
-        main_rect: &RECT,
-    ) -> bool {
+    fn is_direct_banner_slot(&self, main: HWND, child: HWND, pid: u32, main_rect: &RECT) -> bool {
         if window_pid(child) != pid || !is_window_visible(child) {
             return false;
         }
@@ -490,18 +483,15 @@ fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
     let main_width = main_rect.right - main_rect.left;
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
-    let near_bottom =
-        (main_rect.bottom - rect.bottom).abs() <= DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
+    let near_bottom = (main_rect.bottom - rect.bottom).abs() <= DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
     let wide_enough = (width as f32) >= (main_width as f32) * DIRECT_BANNER_MIN_WIDTH_RATIO;
-    let exact_height =
-        (height - DIRECT_BANNER_HEIGHT).abs() <= DIRECT_BANNER_HEIGHT_TOLERANCE_PX;
+    let exact_height = (height - DIRECT_BANNER_HEIGHT).abs() <= DIRECT_BANNER_HEIGHT_TOLERANCE_PX;
 
     near_bottom && wide_enough && exact_height
 }
 
 fn is_in_bottom_banner_band(main_rect: &RECT, rect: &RECT) -> bool {
-    let band_top =
-        main_rect.bottom - DIRECT_BANNER_HEIGHT - DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
+    let band_top = main_rect.bottom - DIRECT_BANNER_HEIGHT - DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
     let horizontal_overlap =
         rect.right > main_rect.left && rect.left < main_rect.right && rect.right > rect.left;
     let vertical_overlap = rect.bottom > band_top && rect.top < main_rect.bottom;
@@ -794,9 +784,8 @@ fn update_window(hwnd: HWND) {
     if !is_window(hwnd) {
         return;
     }
-    const FLAGS: REDRAW_WINDOW_FLAGS = REDRAW_WINDOW_FLAGS(
-        RDW_INVALIDATE.0 | RDW_ERASE.0 | RDW_ALLCHILDREN.0 | RDW_UPDATENOW.0,
-    );
+    const FLAGS: REDRAW_WINDOW_FLAGS =
+        REDRAW_WINDOW_FLAGS(RDW_INVALIDATE.0 | RDW_ERASE.0 | RDW_ALLCHILDREN.0 | RDW_UPDATENOW.0);
     // SAFETY: `hwnd` was verified live; None update-rect and update-region
     // mean "the entire window".
     let _ = unsafe { RedrawWindow(Some(hwnd), None, None, FLAGS) };
@@ -814,7 +803,12 @@ fn process_image_is(pid: u32, target_exe: &str) -> bool {
     let mut size: u32 = buf.len() as u32;
     // SAFETY: `handle` is live; `size` bounds the write into `buf`.
     let ok = unsafe {
-        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut size)
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
     }
     .is_ok();
     // SAFETY: `handle` was returned by OpenProcess and is not used after

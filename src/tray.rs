@@ -1,7 +1,7 @@
 // System tray icon and menu wiring.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -281,11 +281,7 @@ fn select_ico_image(bytes: &'static [u8]) -> TrayResult<&'static [u8]> {
 }
 
 fn decode_ico_dimension(value: u8) -> u32 {
-    if value == 0 {
-        256
-    } else {
-        value as u32
-    }
+    if value == 0 { 256 } else { value as u32 }
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> TrayResult<u16> {

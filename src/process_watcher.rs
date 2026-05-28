@@ -2,18 +2,18 @@
 
 use crate::config::Config;
 use log::{debug, info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
+use windows::core::{PCWSTR, w};
 
 const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
 const MAIN_HWND_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
