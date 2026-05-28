@@ -1,5 +1,6 @@
 // Event-driven ad-block reapplication for KakaoTalk window restore/show.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -23,7 +24,9 @@ const PID_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RESTORE_BURST_DURATION: Duration = Duration::from_millis(650);
 const RESTORE_BURST_INTERVAL: Duration = Duration::from_millis(75);
 
-static EVENT_PENDING: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static EVENT_PENDING: Cell<bool> = const { Cell::new(false) };
+}
 
 pub fn start_reapply_worker(
     adblocker: Arc<Mutex<AdBlocker>>,
@@ -57,7 +60,7 @@ pub fn start_reapply_worker(
 
                     if hooks.as_ref().map(|h| h.pid) != desired_pid {
                         hooks = desired_pid.and_then(install_hooks);
-                        EVENT_PENDING.store(false, Ordering::Release);
+                        clear_event_pending();
                     }
                 }
 
@@ -69,7 +72,7 @@ pub fn start_reapply_worker(
 
                 pump_messages(wait_for);
 
-                if EVENT_PENDING.swap(false, Ordering::AcqRel) {
+                if take_event_pending() {
                     debug!("KakaoTalk window event observed; syncing ad blocker state");
                     sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_running);
                     burst_until = Some(Instant::now() + RESTORE_BURST_DURATION);
@@ -124,6 +127,22 @@ fn pump_messages(wait_for: Duration) {
         let _ = unsafe { TranslateMessage(&message) };
         unsafe { DispatchMessageW(&message) };
     }
+}
+
+fn clear_event_pending() {
+    EVENT_PENDING.with(|pending| pending.set(false));
+}
+
+fn set_event_pending() {
+    EVENT_PENDING.with(|pending| pending.set(true));
+}
+
+fn take_event_pending() -> bool {
+    EVENT_PENDING.with(|pending| {
+        let value = pending.get();
+        pending.set(false);
+        value
+    })
 }
 
 struct WinEventHooks {
@@ -201,7 +220,7 @@ unsafe extern "system" fn win_event_proc(
         return;
     }
     if should_reapply_for_event(event, hwnd) {
-        EVENT_PENDING.store(true, Ordering::Release);
+        set_event_pending();
     }
 }
 

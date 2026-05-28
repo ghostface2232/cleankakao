@@ -115,7 +115,7 @@ fn main() {
         });
     }
 
-    let _process_watcher = watcher.start();
+    let _process_watcher = watcher.start(Arc::clone(&app_running));
     let _periodic_reapply = start_periodic_reapply_worker(
         Arc::clone(&adblocker),
         Arc::clone(&blocking_enabled),
