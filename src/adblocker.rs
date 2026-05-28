@@ -21,16 +21,16 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetClassNameW,
-    GetParent, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOP,
-    IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, SetWindowPos, ShowWindow, WS_POPUP,
+    EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetParent,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow,
+    IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    ShowWindow, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use crate::config::Config;
-
-const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
+use crate::constants::KAKAOTALK_EXE;
+use crate::win32::{class_name, window_text};
 
 // Values mirrored from blurfx/KakaoTalkAdBlock's current main-view resizing
 // approach. The bottom ad strip is accounted for by shrinking the desired
@@ -690,28 +690,6 @@ fn is_window_visible(hwnd: HWND) -> bool {
 fn is_iconic(hwnd: HWND) -> bool {
     // SAFETY: IsIconic accepts any HWND value.
     unsafe { IsIconic(hwnd) }.as_bool()
-}
-
-fn class_name(hwnd: HWND) -> String {
-    let mut buf = [0u16; 256];
-    // SAFETY: `buf` is a live stack array; GetClassNameW writes at most
-    // buf.len()-1 UTF-16 code units.
-    let len = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
-    if len == 0 {
-        return String::new();
-    }
-    String::from_utf16_lossy(&buf[..len.min(buf.len())])
-}
-
-fn window_text(hwnd: HWND) -> String {
-    let mut buf = [0u16; 512];
-    // SAFETY: `buf` is a live stack array; GetWindowTextW writes at most
-    // buf.len()-1 UTF-16 code units.
-    let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
-    if len == 0 {
-        return String::new();
-    }
-    String::from_utf16_lossy(&buf[..len.min(buf.len())])
 }
 
 fn get_style(hwnd: HWND) -> i32 {

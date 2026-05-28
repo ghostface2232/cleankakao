@@ -1,6 +1,7 @@
 // KakaoTalk process discovery and lifecycle watching.
 
 use crate::config::Config;
+use crate::constants::KAKAOTALK_EXE;
 use log::{debug, info, warn};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,7 +16,6 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
 use windows::core::{PCWSTR, w};
 
-const KAKAOTALK_EXE: &str = "KakaoTalk.exe";
 const MAIN_HWND_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAIN_HWND_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_APPLY_WINDOW: Duration = Duration::from_secs(5);

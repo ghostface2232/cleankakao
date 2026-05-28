@@ -13,6 +13,8 @@ use tray_icon::{
 use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconFromResourceEx, LR_DEFAULTCOLOR};
 
+use crate::ico;
+
 const ACTIVE_ICON_BYTES: &[u8] = include_bytes!("../assets/icon_active.ico");
 const INACTIVE_ICON_BYTES: &[u8] = include_bytes!("../assets/icon_inactive.ico");
 const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
@@ -201,7 +203,7 @@ fn icon_for_active(active: bool) -> TrayResult<Icon> {
 }
 
 fn icon_from_ico_bytes(bytes: &'static [u8]) -> TrayResult<Icon> {
-    let image = select_ico_image(bytes)?;
+    let image = ico::select_ico_image(bytes, TRAY_ICON_SIZE as u32)?;
 
     // SAFETY: `image` is a slice into the embedded ICO data and contains one
     // icon image resource selected from a validated ICO directory entry.
@@ -220,86 +222,4 @@ fn icon_from_ico_bytes(bytes: &'static [u8]) -> TrayResult<Icon> {
     .map_err(|e| e.to_string())?;
 
     Ok(Icon::from_handle(hicon.0 as isize))
-}
-
-fn select_ico_image(bytes: &'static [u8]) -> TrayResult<&'static [u8]> {
-    if bytes.len() < 6 {
-        return Err("ICO data is too short".into());
-    }
-
-    let reserved = read_u16(bytes, 0)?;
-    let image_type = read_u16(bytes, 2)?;
-    let count = read_u16(bytes, 4)? as usize;
-
-    if reserved != 0 || image_type != 1 {
-        return Err("ICO header is invalid".into());
-    }
-
-    let entries_end = 6usize
-        .checked_add(
-            count
-                .checked_mul(16)
-                .ok_or_else(|| "ICO entry table is too large".to_string())?,
-        )
-        .ok_or_else(|| "ICO entry table overflows".to_string())?;
-    if bytes.len() < entries_end {
-        return Err("ICO entry table is truncated".into());
-    }
-
-    let mut best: Option<(usize, (u32, u32, u32))> = None;
-    for index in 0..count {
-        let offset = 6 + index * 16;
-        let width = decode_ico_dimension(bytes[offset]);
-        let height = decode_ico_dimension(bytes[offset + 1]);
-        let size = read_u32(bytes, offset + 8)? as usize;
-        let image_offset = read_u32(bytes, offset + 12)? as usize;
-        let image_end = image_offset
-            .checked_add(size)
-            .ok_or_else(|| "ICO image range overflows".to_string())?;
-
-        if image_offset >= bytes.len() || image_end > bytes.len() || size == 0 {
-            continue;
-        }
-
-        let desired = TRAY_ICON_SIZE as u32;
-        let too_small_penalty = u32::from(width < desired || height < desired);
-        let max_size_delta = width.max(height).abs_diff(desired);
-        let shape_delta = width.abs_diff(desired) + height.abs_diff(desired);
-        let score = (too_small_penalty, max_size_delta, shape_delta);
-
-        if best.is_none_or(|(_, best_score)| score < best_score) {
-            best = Some((index, score));
-        }
-    }
-
-    let (index, _) = best.ok_or_else(|| "ICO contains no usable image".to_string())?;
-    let offset = 6 + index * 16;
-    let size = read_u32(bytes, offset + 8)? as usize;
-    let image_offset = read_u32(bytes, offset + 12)? as usize;
-
-    Ok(&bytes[image_offset..image_offset + size])
-}
-
-fn decode_ico_dimension(value: u8) -> u32 {
-    if value == 0 { 256 } else { value as u32 }
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> TrayResult<u16> {
-    let end = offset
-        .checked_add(2)
-        .ok_or_else(|| "offset overflows".to_string())?;
-    let slice = bytes
-        .get(offset..end)
-        .ok_or_else(|| "unexpected end of data".to_string())?;
-    Ok(u16::from_le_bytes([slice[0], slice[1]]))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> TrayResult<u32> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| "offset overflows".to_string())?;
-    let slice = bytes
-        .get(offset..end)
-        .ok_or_else(|| "unexpected end of data".to_string())?;
-    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }

@@ -10,12 +10,13 @@ use windows::Win32::Foundation::{HWND, WAIT_FAILED, WAIT_TIMEOUT};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
-    EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, GetClassNameW,
-    GetWindowTextW, MSG, MsgWaitForMultipleObjects, OBJID_WINDOW, PM_REMOVE, PeekMessageW,
-    QS_ALLINPUT, TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG,
+    MsgWaitForMultipleObjects, OBJID_WINDOW, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+    TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 use crate::adblocker::AdBlocker;
+use crate::win32::{class_name, window_text};
 
 const EVENT_LOOP_WAIT: Duration = Duration::from_millis(50);
 const PID_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -232,26 +233,4 @@ fn is_relevant_kakaotalk_window(hwnd: HWND) -> bool {
     }
 
     window_text(hwnd) == "Chrome Legacy Window"
-}
-
-fn class_name(hwnd: HWND) -> String {
-    let mut buf = [0u16; 256];
-    // SAFETY: `buf` is a live stack array; GetClassNameW writes at most
-    // buf.len() - 1 UTF-16 code units.
-    let len = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
-    if len == 0 {
-        return String::new();
-    }
-    String::from_utf16_lossy(&buf[..len.min(buf.len())])
-}
-
-fn window_text(hwnd: HWND) -> String {
-    let mut buf = [0u16; 512];
-    // SAFETY: `buf` is a live stack array; GetWindowTextW writes at most
-    // buf.len() - 1 UTF-16 code units.
-    let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
-    if len == 0 {
-        return String::new();
-    }
-    String::from_utf16_lossy(&buf[..len.min(buf.len())])
 }

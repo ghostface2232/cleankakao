@@ -4,10 +4,13 @@
 
 mod adblocker;
 mod config;
+mod constants;
+mod ico;
 mod process_watcher;
 mod tray;
 mod ui;
 mod updater;
+mod win32;
 mod window_events;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -349,6 +352,7 @@ fn drain_tray_events(
         match event {
             TrayEvent::ToggleBlocking => {
                 let active = !blocking_enabled.load(Ordering::Acquire);
+                persist_blocking_config(config, active);
                 blocking_enabled.store(active, Ordering::Release);
                 if let Err(e) = tray.set_active(active) {
                     warn!("failed to update tray state: {e}");
@@ -370,6 +374,24 @@ fn drain_tray_events(
                 unsafe { PostQuitMessage(0) };
             }
         }
+    }
+}
+
+fn persist_blocking_config(config: &Arc<RwLock<Config>>, active: bool) {
+    let next = match config.write() {
+        Ok(mut shared) => {
+            shared.ad_block_banner = active;
+            shared.ad_block_popup = active;
+            shared.clone()
+        }
+        Err(e) => {
+            warn!("failed to update shared blocking config: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = next.save() {
+        warn!("failed to save blocking config: {e}");
     }
 }
 
