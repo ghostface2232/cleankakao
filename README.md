@@ -54,6 +54,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+## 참고 및 감사
+
+CleanKakao는 [blurfx/KakaoTalkAdBlock](https://github.com/blurfx/KakaoTalkAdBlock)의 아이디어와 구현 접근에서 영향을 받았습니다. CleanKakao는 별도의 Rust 구현이며, 독립적인 구조와 코드베이스를 사용합니다.
+
 ## 라이선스
 
 MIT License. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
