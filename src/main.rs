@@ -200,10 +200,12 @@ fn start_periodic_reapply_worker(
         .name("adblocker-reapply".into())
         .spawn(move || {
             while app_running.load(Ordering::Acquire) {
-                if blocking_enabled.load(Ordering::Acquire)
-                    && kakaotalk_running.load(Ordering::Acquire)
-                {
-                    apply_adblocker(&adblocker);
+                if kakaotalk_running.load(Ordering::Acquire) {
+                    if blocking_enabled.load(Ordering::Acquire) {
+                        apply_adblocker(&adblocker);
+                    } else {
+                        restore_adblocker(&adblocker);
+                    }
                 }
 
                 thread::sleep(REAPPLY_INTERVAL);

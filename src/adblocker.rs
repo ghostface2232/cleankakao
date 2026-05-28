@@ -54,6 +54,13 @@ const POPUP_MAX_DIM: i32 = 900;
 struct WindowState {
     rect: RECT,
     visible: bool,
+    kind: RestoreKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreKind {
+    ResizedPane,
+    HiddenWindow,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +110,10 @@ impl AdBlocker {
         self.original.clear();
     }
 
+    pub fn has_pending_restore(&self) -> bool {
+        !self.original.is_empty()
+    }
+
     pub fn apply_all(&mut self) {
         let cfg = self.config.read().unwrap().clone();
 
@@ -138,35 +149,61 @@ impl AdBlocker {
     }
 
     pub fn restore_all(&mut self) {
-        for (raw, state) in self.original.drain() {
+        if self.original.is_empty() {
+            return;
+        }
+
+        if let Some(main) = self.main_hwnd().or_else(|| self.locate_main_window())
+            && is_iconic(main)
+        {
+            return;
+        }
+
+        let mut states: Vec<_> = self.original.drain().collect();
+        states.sort_by_key(|(_, state)| match state.kind {
+            RestoreKind::ResizedPane => 0,
+            RestoreKind::HiddenWindow => 1,
+        });
+
+        for (raw, state) in states {
             let hwnd = HWND(raw as *mut c_void);
             if !is_window(hwnd) {
                 continue;
             }
 
-            let width = state.rect.right - state.rect.left;
-            let height = state.rect.bottom - state.rect.top;
-            if width > 0 && height > 0 {
-                // SAFETY: `hwnd` is live. We only restore the saved size
-                // because child-window x/y values from GetWindowRect are in
-                // screen coordinates, while SetWindowPos expects parent
-                // client coordinates for children.
-                let _ = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        0,
-                        0,
-                        width,
-                        height,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE,
-                    )
-                };
+            match state.kind {
+                RestoreKind::ResizedPane => {
+                    let width = state.rect.right - state.rect.left;
+                    let height = state.rect.bottom - state.rect.top;
+                    if width > 0 && height > 0 {
+                        // SAFETY: `hwnd` is live. We only restore the saved
+                        // size because child-window x/y values from
+                        // GetWindowRect are in screen coordinates, while
+                        // SetWindowPos expects parent client coordinates for
+                        // children.
+                        let _ = unsafe {
+                            SetWindowPos(
+                                hwnd,
+                                Some(HWND_TOP),
+                                0,
+                                0,
+                                width,
+                                height,
+                                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE,
+                            )
+                        };
+                    }
+                }
+                RestoreKind::HiddenWindow => {
+                    let cmd = if state.visible { SW_SHOW } else { SW_HIDE };
+                    // SAFETY: `hwnd` is live and ShowWindow accepts any valid
+                    // HWND. Restore hidden ad windows only after resized panes
+                    // are back to their original size, so compositor-backed
+                    // ad children do not paint over the expanded main view.
+                    let _ = unsafe { ShowWindow(hwnd, cmd) };
+                    update_window(hwnd);
+                }
             }
-
-            let cmd = if state.visible { SW_SHOW } else { SW_HIDE };
-            // SAFETY: `hwnd` is live and ShowWindow accepts any valid HWND.
-            let _ = unsafe { ShowWindow(hwnd, cmd) };
         }
 
         if let Some(main) = self.main_hwnd {
@@ -292,7 +329,7 @@ impl AdBlocker {
                     return;
                 }
 
-                self.save_state(hwnd);
+                self.save_state(hwnd, RestoreKind::ResizedPane);
                 update_window(hwnd);
                 // SAFETY: `hwnd` is live. SWP_NOMOVE avoids mixing screen
                 // and parent-client coordinates. This is a child main-view
@@ -318,7 +355,7 @@ impl AdBlocker {
                 if !is_window(hwnd) || !is_window_visible(hwnd) {
                     return;
                 }
-                self.save_state(hwnd);
+                self.save_state(hwnd, RestoreKind::HiddenWindow);
                 // SAFETY: `hwnd` is live and this is the documented way to
                 // hide a child/top-level window without clipping the CEF
                 // compositor tree into a black frame.
@@ -330,7 +367,7 @@ impl AdBlocker {
         }
     }
 
-    fn save_state(&mut self, hwnd: HWND) {
+    fn save_state(&mut self, hwnd: HWND, kind: RestoreKind) {
         let key = hwnd.0 as isize;
         if self.original.contains_key(&key) {
             return;
@@ -342,6 +379,7 @@ impl AdBlocker {
                 WindowState {
                     rect,
                     visible: is_window_visible(hwnd),
+                    kind,
                 },
             );
         }
@@ -446,14 +484,6 @@ fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
     near_bottom && wide_enough && exact_height
 }
 
-fn is_in_bottom_banner_band(main_rect: &RECT, rect: &RECT) -> bool {
-    let band_top = main_rect.bottom - DIRECT_BANNER_HEIGHT - DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
-    let horizontal_overlap =
-        rect.right > main_rect.left && rect.left < main_rect.right && rect.right > rect.left;
-    let vertical_overlap = rect.bottom > band_top && rect.top < main_rect.bottom;
-    horizontal_overlap && vertical_overlap
-}
-
 // ===========================================================================
 // Popup discovery
 // ===========================================================================
@@ -488,10 +518,7 @@ fn find_popup_ads(main_hwnd: HWND, pid: u32) -> Vec<AdWindow> {
     }
     for hwnd in enum_related_process_windows(main_hwnd, pid) {
         let already_selected = ctx.out.iter().any(|ad| ad.hwnd().0 == hwnd.0);
-        if !already_selected
-            && (is_bottom_banner_frame(hwnd, ctx.main_key, &ctx.main_rect)
-                || is_bottom_banner_render_surface(hwnd, &ctx.main_rect))
-        {
+        if !already_selected && is_bottom_banner_frame(hwnd, ctx.main_key, &ctx.main_rect) {
             ctx.out.push(AdWindow::BannerSlot { hwnd });
         }
     }
@@ -554,25 +581,6 @@ fn is_bottom_banner_frame(hwnd: HWND, main_key: isize, main_rect: &RECT) -> bool
         None => return false,
     };
     is_bottom_banner_rect(main_rect, &rect)
-}
-
-fn is_bottom_banner_render_surface(hwnd: HWND, main_rect: &RECT) -> bool {
-    if !is_window_visible(hwnd) {
-        return false;
-    }
-    let class = class_name(hwnd);
-    let is_chrome_surface = class.starts_with("Chrome_RenderWidgetHost")
-        || class.starts_with("Chrome_WidgetWin")
-        || class == "Chrome Legacy Window"
-        || window_text(hwnd) == "Chrome Legacy Window";
-    if !is_chrome_surface {
-        return false;
-    }
-    let rect = match window_rect(hwnd) {
-        Some(r) => r,
-        None => return false,
-    };
-    is_in_bottom_banner_band(main_rect, &rect)
 }
 
 unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
