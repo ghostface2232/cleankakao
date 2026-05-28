@@ -13,7 +13,6 @@ pub struct Config {
     pub check_update: bool,
     pub poll_interval_ms: u64,
     pub startup_delay_ms: u64,
-    pub whitelist_keywords: Vec<String>,
 }
 
 impl Default for Config {
@@ -25,21 +24,6 @@ impl Default for Config {
             check_update: true,
             poll_interval_ms: 1000,
             startup_delay_ms: 1000,
-            whitelist_keywords: [
-                "생일",
-                "투표",
-                "일정",
-                "설정",
-                "프로필",
-                "알림",
-                "동영상",
-                "영상통화",
-                "보이스톡",
-                "페이스톡",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
         }
     }
 }

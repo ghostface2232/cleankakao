@@ -9,10 +9,10 @@ use log::{debug, warn};
 use windows::Win32::Foundation::{HWND, WAIT_FAILED, WAIT_TIMEOUT};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG, MsgWaitForMultipleObjects,
-    OBJID_WINDOW, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS,
+    CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, GetClassNameW,
+    GetWindowTextW, MSG, MsgWaitForMultipleObjects, OBJID_WINDOW, PM_REMOVE, PeekMessageW,
+    QS_ALLINPUT, TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 use crate::adblocker::AdBlocker;
@@ -138,6 +138,7 @@ fn install_hooks(pid: u32) -> Option<WinEventHooks> {
         (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
         (EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND),
         (EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW),
+        (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
     ];
     let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
     let mut hooks = Vec::new();
@@ -190,13 +191,59 @@ unsafe extern "system" fn win_event_proc(
     if idobject != OBJID_WINDOW.0 || idchild != CHILDID_SELF as i32 {
         return;
     }
-    if matches!(
-        event,
-        EVENT_SYSTEM_FOREGROUND
-            | EVENT_SYSTEM_MINIMIZEEND
-            | EVENT_OBJECT_CREATE
-            | EVENT_OBJECT_SHOW
-    ) {
+    if should_reapply_for_event(event, hwnd) {
         EVENT_PENDING.store(true, Ordering::Release);
     }
+}
+
+fn should_reapply_for_event(event: u32, hwnd: HWND) -> bool {
+    if matches!(event, EVENT_SYSTEM_FOREGROUND | EVENT_SYSTEM_MINIMIZEEND) {
+        return true;
+    }
+
+    if !matches!(
+        event,
+        EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW | EVENT_OBJECT_LOCATIONCHANGE
+    ) {
+        return false;
+    }
+
+    is_relevant_kakaotalk_window(hwnd)
+}
+
+fn is_relevant_kakaotalk_window(hwnd: HWND) -> bool {
+    let class = class_name(hwnd);
+    if matches!(
+        class.as_str(),
+        "EVA_Window" | "EVA_Window_Dblclk" | "EVA_ChildWindow"
+    ) || class.starts_with("Chrome_RenderWidgetHost")
+        || class.starts_with("Chrome_WidgetWin")
+        || class == "Chrome Legacy Window"
+    {
+        return true;
+    }
+
+    window_text(hwnd) == "Chrome Legacy Window"
+}
+
+fn class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: `buf` is a live stack array; GetClassNameW writes at most
+    // buf.len() - 1 UTF-16 code units.
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
+    if len == 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len.min(buf.len())])
+}
+
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    // SAFETY: `buf` is a live stack array; GetWindowTextW writes at most
+    // buf.len() - 1 UTF-16 code units.
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
+    if len == 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len.min(buf.len())])
 }
