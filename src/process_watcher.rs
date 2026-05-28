@@ -51,14 +51,6 @@ impl ProcessWatcher {
         )
     }
 
-    pub fn is_running(&self) -> bool {
-        self.is_running.load(Ordering::Acquire)
-    }
-
-    pub fn current_pid(&self) -> Option<u32> {
-        *self.kakaotalk_pid.lock().unwrap()
-    }
-
     /// Shareable handle to the running flag — useful for the tray icon, which
     /// needs to observe state from another thread after `start` consumes self.
     pub fn is_running_handle(&self) -> Arc<AtomicBool> {

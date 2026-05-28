@@ -27,7 +27,6 @@ pub struct Tray {
     tray_icon: NativeTrayIcon,
     blocking_item: CheckMenuItem,
     _menu: Menu,
-    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +38,6 @@ pub enum TrayEvent {
 }
 
 impl Tray {
-    /// Build the tray icon, context menu, and event channel.
-    pub fn new() -> TrayResult<(Self, Receiver<TrayEvent>)> {
-        Self::with_active(true)
-    }
-
     /// Build the tray icon with an explicit initial blocking state.
     pub fn with_active(active: bool) -> TrayResult<(Self, Receiver<TrayEvent>)> {
         let (sender, receiver) = channel();
@@ -91,7 +85,6 @@ impl Tray {
                 tray_icon,
                 blocking_item,
                 _menu: menu,
-                active,
             },
             receiver,
         ))
@@ -106,12 +99,7 @@ impl Tray {
             .set_tooltip(Some(tooltip_for_active(active)))
             .map_err(|e| e.to_string())?;
         self.blocking_item.set_checked(active);
-        self.active = active;
         Ok(())
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.active
     }
 }
 
