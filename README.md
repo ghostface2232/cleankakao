@@ -1,3 +1,6 @@
+<img width="120" alt="Group 1" src="https://github.com/user-attachments/assets/93205710-33fc-4bfa-9893-87ac530ab405" />
+
+
 # CleanKakao
 
 CleanKakao는 Windows용 KakaoTalk의 배너 및 팝업 광고를 없애주는 시스템 트레이 앱입니다.
@@ -57,12 +60,9 @@ cargo test
 
 CleanKakao는 [blurfx/KakaoTalkAdBlock](https://github.com/blurfx/KakaoTalkAdBlock)의 아이디어와 구현 접근에서 영향을 받았습니다.
 CleanKakao는 별도의 Rust 구현이며, 독립적인 구조와 코드베이스를 사용합니다.
+CleanKakao는 Kakao Corp. 또는 KakaoTalk와 무관한 비공식 서드파티 도구입니다.
 
 ## 라이선스
 
 MIT License.
 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
-
-## 면책 조항
-
-CleanKakao는 Kakao Corp. 또는 KakaoTalk와 무관한 비공식 서드파티 도구입니다.
