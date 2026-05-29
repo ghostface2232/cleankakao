@@ -24,7 +24,7 @@ use log::warn;
 use windows::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -42,9 +42,8 @@ use crate::win32::window_text;
 
 const REPO_URL: &str = "https://github.com/ghostface2232/cleankakao";
 const WINDOW_TITLE: &str = " ";
-// Height of the custom title bar. The OS chrome is disabled
-// (`decorations: false`), so the window grows by this amount to keep the body
-// content area identical to the original layout.
+// Height of the custom title bar that replaces the disabled OS chrome
+// (`decorations: false`). Accounted for in the fixed window height below.
 const TITLE_BAR_HEIGHT: f32 = 32.0;
 const CAPTION_BUTTON_WIDTH: f32 = 44.0;
 const CAPTION_ICON_SIZE: f32 = 16.0;
@@ -55,6 +54,9 @@ const CAPTION_ICON_SIZE: f32 = 16.0;
 const CONTENT_SIDE_PAD: f32 = 20.0;
 const CONTENT_TOP_PAD: f32 = 0.0;
 const CONTENT_BOTTOM_PAD: f32 = 10.0;
+// Fixed window size. The height is hand-tuned to fit the title bar plus the
+// content column snugly; it is not derived, so changing the content or padding
+// may require picking a fresh value by eye.
 const WINDOW_SIZE: Size = Size {
     width: 400.0,
     height: 570.0,
@@ -763,60 +765,57 @@ fn find_own_top_level_window(title: &str) -> Option<HWND> {
 }
 
 fn apply_mica(hwnd: HWND, mode: Mode) {
-    // SAFETY: `hwnd` is a live top-level window owned by this process. Each
-    // DWM call takes a valid HWND and properly sized inputs.
-    unsafe {
-        // Note: we deliberately do NOT call `DwmExtendFrameIntoClientArea`.
-        // The window is borderless (`decorations: false`) but winit keeps the
-        // `WS_SYSMENU | WS_MIN/MAXIMIZEBOX` styles, so extending the frame into
-        // the client area makes DWM render ghost caption buttons (min/max/close)
-        // at the top-right. On Win11 the transparent client lets the
-        // `DWMSBT_MAINWINDOW` backdrop show through without the frame extension.
+    // We deliberately do NOT call `DwmExtendFrameIntoClientArea`. The window is
+    // borderless (`decorations: false`) but winit keeps the
+    // `WS_SYSMENU | WS_MIN/MAXIMIZEBOX` styles, so extending the frame into the
+    // client area makes DWM render ghost caption buttons (min/max/close) at the
+    // top-right. On Win11 the transparent client lets the `DWMSBT_MAINWINDOW`
+    // backdrop show through without the frame extension.
 
-        // (1) Sync DWM's immersive palette to the chosen light/dark mode so the
-        // backdrop tint matches.
-        let dark: i32 = match mode {
-            Mode::Dark => 1,
-            Mode::Light => 0,
-        };
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark as *const i32 as *const core::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        ) {
-            warn!("settings: DWMWA_USE_IMMERSIVE_DARK_MODE failed: {e}");
+    // SAFETY: `hwnd` is a live top-level window owned by this process; each call
+    // passes a live i32 of the documented attribute size. DWM ignores unknown
+    // attribute ids on older Windows, so failures are logged and tolerated.
+    let set_attr = |attr: DWMWINDOWATTRIBUTE, value: i32, label: &str| {
+        if let Err(e) = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &value as *const i32 as *const core::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            )
+        } {
+            warn!("settings: {label} failed: {e}");
         }
+    };
 
-        // (2) Engage Mica. `DWMSBT_MAINWINDOW` asks DWM to draw the backdrop
-        // behind the whole window bounds; iced's transparent clear color then
-        // lets that material show through the root container. Keep winit's
-        // blur-behind transparency enabled: disabling it makes the swapchain
-        // alpha get composed as an opaque light client area on some systems.
-        let backdrop: i32 = DWMSBT_MAINWINDOW.0;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop as *const i32 as *const core::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        ) {
-            warn!("settings: DWMWA_SYSTEMBACKDROP_TYPE failed: {e}");
-        }
+    // Sync DWM's immersive palette to the chosen light/dark mode so the backdrop
+    // tint matches.
+    let dark = match mode {
+        Mode::Dark => 1,
+        Mode::Light => 0,
+    };
+    set_attr(
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        dark,
+        "DWMWA_USE_IMMERSIVE_DARK_MODE",
+    );
 
-        // (3) The window is borderless (`decorations: false`) so it can host a
-        // custom title bar. Win11 can drop the rounded corners on a frameless
-        // window, so request them explicitly to keep the Mica surface looking
-        // native. Ignored on Win10 and older (DWM rejects the unknown attribute).
-        let corner: i32 = DWMWCP_ROUND.0;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &corner as *const i32 as *const core::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        ) {
-            warn!("settings: DWMWA_WINDOW_CORNER_PREFERENCE failed: {e}");
-        }
-    }
+    // Engage Mica. `DWMSBT_MAINWINDOW` asks DWM to draw the backdrop behind the
+    // whole window bounds; iced's transparent clear color then lets that
+    // material show through the root container.
+    set_attr(
+        DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMSBT_MAINWINDOW.0,
+        "DWMWA_SYSTEMBACKDROP_TYPE",
+    );
+
+    // The borderless window can lose Win11's rounded corners, so request them
+    // explicitly to keep the Mica surface looking native.
+    set_attr(
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_ROUND.0,
+        "DWMWA_WINDOW_CORNER_PREFERENCE",
+    );
 }
 
 fn apply_taskbar_icon(hwnd: HWND) {
