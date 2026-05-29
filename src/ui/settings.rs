@@ -2,8 +2,8 @@
 //
 // The window is launched from the tray thread via [`super::open_settings_window`]
 // and runs an isolated iced application: closing it (via the `닫기` button or
-// the X chrome button) exits the iced runtime but leaves the host tray app
-// alive in `main`.
+// the custom title-bar close button) exits the iced runtime but leaves the
+// host tray app alive in `main`.
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
@@ -29,8 +29,8 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, EnumWindows, GetWindowThreadProcessId, ICON_BIG, ICON_SMALL,
-    ICON_SMALL2, IsWindowVisible, LR_DEFAULTCOLOR, SendMessageW, WM_SETICON,
+    CreateIconFromResourceEx, EnumWindows, GetWindowThreadProcessId, ICON_BIG, IsWindowVisible,
+    LR_DEFAULTCOLOR, SendMessageW, WM_SETICON,
 };
 use windows::core::BOOL;
 
@@ -703,7 +703,6 @@ fn spawn_mica_setup(title: &'static str, mode: Mode) {
             // our explicit Mica backdrop.
             thread::sleep(MICA_POST_CREATE_DELAY);
             apply_mica(hwnd, mode);
-            hide_titlebar_icon(hwnd);
             apply_taskbar_icon(hwnd);
         })
         .map_err(|e| warn!("settings: failed to spawn Mica setup thread: {e}"))
@@ -817,25 +816,6 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
         ) {
             warn!("settings: DWMWA_WINDOW_CORNER_PREFERENCE failed: {e}");
         }
-    }
-}
-
-fn hide_titlebar_icon(hwnd: HWND) {
-    // SAFETY: `hwnd` is a live top-level window owned by this process. Passing a
-    // null icon handle clears the non-client small icon slots only.
-    unsafe {
-        let _ = SendMessageW(
-            hwnd,
-            WM_SETICON,
-            Some(WPARAM(ICON_SMALL as usize)),
-            Some(LPARAM(0)),
-        );
-        let _ = SendMessageW(
-            hwnd,
-            WM_SETICON,
-            Some(WPARAM(ICON_SMALL2 as usize)),
-            Some(LPARAM(0)),
-        );
     }
 }
 

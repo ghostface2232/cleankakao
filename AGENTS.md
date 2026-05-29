@@ -31,6 +31,9 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 - `src/window_events.rs` — WinEvent hook worker for restore/show/create/location-change reapply triggers.
 - `src/config.rs` — TOML config load/save (defaults + user overrides).
 - `src/tray.rs` — `tray-icon` + `muda` wiring, tray events.
+- `src/ico.rs` — picks the best-fit image from embedded `.ico` bytes for the tray and window/taskbar icons.
+- `src/win32.rs` — shared Win32 helpers (`class_name`, `window_text`).
+- `src/constants.rs` — shared constants (e.g. `KAKAOTALK_EXE`).
 - `src/ui/` — iced settings window.
   - `settings.rs` — window state + `Message` enum.
   - `theme.rs` — custom WinUI3-style theme.
