@@ -26,8 +26,8 @@ use process_watcher::ProcessWatcher;
 use tray::{Tray, TrayEvent};
 use updater::{DEFAULT_UPDATE_CHECK_INTERVAL, UpdateChecker};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, HWND,
-    WAIT_FAILED, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, WAIT_FAILED,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
@@ -35,9 +35,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
-    PostQuitMessage, QS_ALLINPUT, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage,
-    WM_QUIT,
+    DispatchMessageW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostQuitMessage,
+    QS_ALLINPUT, TranslateMessage, WM_QUIT,
 };
 use windows::core::{PCWSTR, w};
 
@@ -160,7 +159,7 @@ impl SingleInstance {
         // SAFETY: GetLastError has no preconditions and reports whether the
         // named mutex already existed after CreateMutexW returned.
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            focus_existing_instance();
+            // Another instance already holds the mutex; this one simply exits.
             // SAFETY: `handle` was returned by CreateMutexW above and is not
             // used after this close.
             let _ = unsafe { CloseHandle(handle) };
@@ -176,21 +175,6 @@ impl Drop for SingleInstance {
         // SAFETY: The handle is owned by this guard and is closed exactly once.
         let _ = unsafe { CloseHandle(self.0) };
     }
-}
-
-fn focus_existing_instance() {
-    // There may be no visible app window yet because CleanKakao primarily
-    // lives in the tray. This is a best-effort path for future settings UI.
-    // SAFETY: Both arguments are static or null PCWSTR values. FindWindowW
-    // does not mutate caller-owned memory.
-    let hwnd = unsafe { FindWindowW(PCWSTR::null(), w!("CleanKakao")) }.unwrap_or(HWND::default());
-    if hwnd.0.is_null() {
-        return;
-    }
-
-    // SAFETY: `hwnd` came from FindWindowW. Bringing it forward is best-effort.
-    let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
-    let _ = unsafe { SetForegroundWindow(hwnd) };
 }
 
 fn start_periodic_reapply_worker(
