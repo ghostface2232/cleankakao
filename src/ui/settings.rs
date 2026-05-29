@@ -17,18 +17,17 @@ use iced::widget::{
     Space, button, column, container, image as image_widget, mouse_area, row, text,
 };
 use iced::{
-    Alignment, Color, ContentFit, Element, Length, Pixels, Settings, Size, Subscription, Task,
-    Theme, window,
+    Alignment, Color, ContentFit, Element, Length, Padding, Pixels, Settings, Size, Subscription,
+    Task, Theme, window,
 };
 use log::warn;
 use windows::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconFromResourceEx, EnumWindows, GetWindowThreadProcessId, ICON_BIG, ICON_SMALL,
     ICON_SMALL2, IsWindowVisible, LR_DEFAULTCOLOR, SendMessageW, WM_SETICON,
@@ -43,9 +42,22 @@ use crate::win32::window_text;
 
 const REPO_URL: &str = "https://github.com/ghostface2232/cleankakao";
 const WINDOW_TITLE: &str = " ";
+// Height of the custom title bar. The OS chrome is disabled
+// (`decorations: false`), so the window grows by this amount to keep the body
+// content area identical to the original layout.
+const TITLE_BAR_HEIGHT: f32 = 32.0;
+const CAPTION_BUTTON_WIDTH: f32 = 44.0;
+const CAPTION_ICON_SIZE: f32 = 16.0;
+// Content padding, per side. The top is flush (0): the custom title bar sits
+// above and the OS caption (icon + title) that used to occupy the top space is
+// gone, so the logo rides right up against the title bar. The bottom is kept
+// tight as well; only the sides carry the full inset.
+const CONTENT_SIDE_PAD: f32 = 20.0;
+const CONTENT_TOP_PAD: f32 = 0.0;
+const CONTENT_BOTTOM_PAD: f32 = 10.0;
 const WINDOW_SIZE: Size = Size {
     width: 400.0,
-    height: 585.0,
+    height: 570.0,
 };
 
 const PILL_WIDTH: f32 = 42.0;
@@ -76,6 +88,9 @@ pub struct State {
     kakaotalk_running: bool,
     last_check: String,
     toggle_animation: ToggleAnimation,
+    // Captured once the window exists; needed to drive the custom title bar's
+    // drag and minimize actions, which are window-id-scoped tasks.
+    window_id: Option<window::Id>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +100,9 @@ pub enum Message {
     ToggleCheckUpdate(bool),
     OpenRepo,
     Close,
+    Minimize,
+    DragWindow,
+    WindowOpened(Option<window::Id>),
     StatusTick,
     AnimationTick(Instant),
 }
@@ -102,6 +120,7 @@ impl State {
             kakaotalk_running: process_watcher::find_kakaotalk_process().is_some(),
             last_check: now_hhmm(),
             toggle_animation: ToggleAnimation::new(ad_block_on, auto_start, check_update),
+            window_id: None,
         }
     }
 
@@ -127,6 +146,17 @@ impl State {
             }
             Message::OpenRepo => open_url(REPO_URL),
             Message::Close => return iced::exit(),
+            Message::Minimize => {
+                if let Some(id) = self.window_id {
+                    return window::minimize(id, true);
+                }
+            }
+            Message::DragWindow => {
+                if let Some(id) = self.window_id {
+                    return window::drag(id);
+                }
+            }
+            Message::WindowOpened(id) => self.window_id = id,
             Message::StatusTick => {
                 self.kakaotalk_running = process_watcher::find_kakaotalk_process().is_some();
                 self.last_check = now_hhmm();
@@ -285,13 +315,71 @@ impl State {
 
         let body = column![header, ad_block, general, status, footer,].spacing(18);
 
-        container(body)
-            .padding(20)
+        let content = container(body)
+            .padding(
+                Padding::new(CONTENT_SIDE_PAD)
+                    .top(CONTENT_TOP_PAD)
+                    .bottom(CONTENT_BOTTOM_PAD),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // The root container paints the Mica tint behind both the custom title
+        // bar and the content, so the title bar reads as part of the surface.
+        container(column![title_bar(tokens), content])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::root_container(tokens))
             .into()
     }
+}
+
+/// Custom title bar: a full-width draggable region followed by minimize and
+/// close caption buttons. The OS title bar is disabled, so this stands in for
+/// it — `mouse_area` turns a press on the empty region into a window drag.
+fn title_bar<'a>(tokens: Tokens) -> Element<'a, Message> {
+    let drag_region = mouse_area(
+        container(Space::new(Length::Fill, Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Message::DragWindow);
+
+    row![
+        drag_region,
+        caption_button(tokens, theme::ICON_MINIMIZE, false, Message::Minimize),
+        caption_button(tokens, theme::ICON_CLOSE, true, Message::Close),
+    ]
+    .height(Length::Fixed(TITLE_BAR_HEIGHT))
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn caption_button<'a>(
+    tokens: Tokens,
+    glyph: &'static str,
+    close: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    // No explicit glyph color: it inherits the button's `text_color`, letting
+    // the close button flip to white over its red hover fill.
+    let label = container(
+        text(glyph)
+            .font(theme::ICON_FONT)
+            .size(CAPTION_ICON_SIZE),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(alignment::Horizontal::Center)
+    .align_y(alignment::Vertical::Center);
+
+    button(label)
+        .width(Length::Fixed(CAPTION_BUTTON_WIDTH))
+        .height(Length::Fill)
+        .padding(0)
+        .style(theme::caption_button(tokens, close))
+        .on_press(message)
+        .into()
 }
 
 fn section<'a>(
@@ -586,10 +674,16 @@ pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
             min_size: Some(WINDOW_SIZE),
             max_size: Some(WINDOW_SIZE),
             resizable: false,
+            decorations: false,
             transparent: true,
             ..Default::default()
         })
-        .run_with(move || (State::new(config_handle.clone()), Task::none()))
+        .run_with(move || {
+            (
+                State::new(config_handle.clone()),
+                window::get_latest().map(Message::WindowOpened),
+            )
+        })
 }
 
 /// Poll for the settings window by title from a worker thread, then apply
@@ -673,21 +767,15 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
     // SAFETY: `hwnd` is a live top-level window owned by this process. Each
     // DWM call takes a valid HWND and properly sized inputs.
     unsafe {
-        // (1) Extend DWM's frame across the client area. Some Win32 render
-        // paths only show `DWMSBT_MAINWINDOW` behind the default frame unless
-        // the glass frame is explicitly extended into the client area.
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
-        };
-        if let Err(e) = DwmExtendFrameIntoClientArea(hwnd, &margins) {
-            warn!("settings: DwmExtendFrameIntoClientArea failed: {e}");
-        }
+        // Note: we deliberately do NOT call `DwmExtendFrameIntoClientArea`.
+        // The window is borderless (`decorations: false`) but winit keeps the
+        // `WS_SYSMENU | WS_MIN/MAXIMIZEBOX` styles, so extending the frame into
+        // the client area makes DWM render ghost caption buttons (min/max/close)
+        // at the top-right. On Win11 the transparent client lets the
+        // `DWMSBT_MAINWINDOW` backdrop show through without the frame extension.
 
-        // (2) Sync the non-client (title bar + border) palette to the chosen
-        // light/dark mode so it visually matches the Mica tint.
+        // (1) Sync DWM's immersive palette to the chosen light/dark mode so the
+        // backdrop tint matches.
         let dark: i32 = match mode {
             Mode::Dark => 1,
             Mode::Light => 0,
@@ -701,7 +789,7 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
             warn!("settings: DWMWA_USE_IMMERSIVE_DARK_MODE failed: {e}");
         }
 
-        // (3) Engage Mica. `DWMSBT_MAINWINDOW` asks DWM to draw the backdrop
+        // (2) Engage Mica. `DWMSBT_MAINWINDOW` asks DWM to draw the backdrop
         // behind the whole window bounds; iced's transparent clear color then
         // lets that material show through the root container. Keep winit's
         // blur-behind transparency enabled: disabling it makes the swapchain
@@ -714,6 +802,20 @@ fn apply_mica(hwnd: HWND, mode: Mode) {
             std::mem::size_of::<i32>() as u32,
         ) {
             warn!("settings: DWMWA_SYSTEMBACKDROP_TYPE failed: {e}");
+        }
+
+        // (3) The window is borderless (`decorations: false`) so it can host a
+        // custom title bar. Win11 can drop the rounded corners on a frameless
+        // window, so request them explicitly to keep the Mica surface looking
+        // native. Ignored on Win10 and older (DWM rejects the unknown attribute).
+        let corner: i32 = DWMWCP_ROUND.0;
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        ) {
+            warn!("settings: DWMWA_WINDOW_CORNER_PREFERENCE failed: {e}");
         }
     }
 }

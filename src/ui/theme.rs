@@ -53,6 +53,8 @@ pub const ICON_ROCKET: &str = "\u{F676}"; // ic_fluent_rocket_16_regular
 pub const ICON_ARROW_SYNC: &str = "\u{E110}"; // ic_fluent_arrow_sync_16_regular
 pub const ICON_CIRCLE: &str = "\u{F2BA}"; // ic_fluent_circle_16_regular
 pub const ICON_OPEN: &str = "\u{F581}"; // ic_fluent_open_16_regular
+pub const ICON_MINIMIZE: &str = "\u{EBCF}"; // ic_fluent_subtract_16_regular
+pub const ICON_CLOSE: &str = "\u{F368}"; // ic_fluent_dismiss_16_regular
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -202,6 +204,45 @@ pub fn secondary_button(
                 color: with_alpha(tokens.divider, mica_border_alpha(tokens)),
                 width: 1.0,
                 radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    }
+}
+
+// Windows chrome close-button highlight (hover / pressed). Matches the red
+// the OS caption close button uses, so the custom title bar reads as native.
+const CAPTION_CLOSE_HOVER: Color = rgb(0xC4, 0x2B, 0x1C);
+const CAPTION_CLOSE_PRESSED: Color = rgb(0xB2, 0x27, 0x19);
+
+/// Title-bar caption button (minimize / close). Transparent at rest so the
+/// Mica surface shows through; on hover/press it picks up a subtle fill, or
+/// the red close-button highlight when `close` is set. The glyph color is left
+/// to the inherited `text_color` so the close button can flip to white on red.
+pub fn caption_button(
+    tokens: Tokens,
+    close: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
+    move |_, status| {
+        let (bg, text_color) = match status {
+            button::Status::Active | button::Status::Disabled => {
+                (Color::TRANSPARENT, tokens.text_primary)
+            }
+            button::Status::Hovered if close => (CAPTION_CLOSE_HOVER, Color::WHITE),
+            button::Status::Pressed if close => (CAPTION_CLOSE_PRESSED, Color::WHITE),
+            // Subtle low-opacity gray overlay so the highlight reads clearly on
+            // either the light or dark Mica surface. `text_secondary` is a gray
+            // in both palettes, so a low alpha gives a neutral wash.
+            button::Status::Hovered => (with_alpha(tokens.text_secondary, 0.18), tokens.text_primary),
+            button::Status::Pressed => (with_alpha(tokens.text_secondary, 0.28), tokens.text_primary),
+        };
+        button::Style {
+            background: Some(Background::Color(bg)),
+            text_color,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 0.0.into(),
             },
             shadow: Shadow::default(),
         }
