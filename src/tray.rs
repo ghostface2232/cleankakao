@@ -1,16 +1,12 @@
 // System tray icon and menu wiring.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon as NativeTrayIcon, TrayIconBuilder, TrayIconEvent,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconFromResourceEx, LR_DEFAULTCOLOR};
 
 use crate::ico;
@@ -19,7 +15,6 @@ const ACTIVE_ICON_BYTES: &[u8] = include_bytes!("../assets/icon_active.ico");
 const INACTIVE_ICON_BYTES: &[u8] = include_bytes!("../assets/icon_inactive.ico");
 const ICON_RESOURCE_VERSION: u32 = 0x0003_0000;
 const TRAY_ICON_SIZE: i32 = 32;
-const SINGLE_CLICK_DELAY_PADDING: Duration = Duration::from_millis(50);
 
 pub type TrayResult<T> = Result<T, String>;
 
@@ -132,33 +127,19 @@ fn install_menu_event_handler(sender: Arc<Mutex<Sender<TrayEvent>>>, ids: MenuId
 }
 
 fn install_tray_event_handler(sender: Arc<Mutex<Sender<TrayEvent>>>) {
-    let click_generation = Arc::new(AtomicU64::new(0));
-
-    TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| match event {
-        TrayIconEvent::Click {
+    // A single left-click toggles blocking immediately. Settings is reached via
+    // the right-click context menu, so double-click is intentionally ignored:
+    // the Windows shell reports a double-click as Click + DoubleClick + a
+    // trailing Click, and acting on it would fire an extra spurious toggle.
+    TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| {
+        if let TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
             ..
-        } => {
-            let generation = click_generation.fetch_add(1, Ordering::AcqRel) + 1;
-            let click_generation = Arc::clone(&click_generation);
-            let sender = Arc::clone(&sender);
-
-            thread::spawn(move || {
-                thread::sleep(single_click_delay());
-                if click_generation.load(Ordering::Acquire) == generation {
-                    send_event(&sender, TrayEvent::ToggleBlocking);
-                }
-            });
+        } = event
+        {
+            send_event(&sender, TrayEvent::ToggleBlocking);
         }
-        TrayIconEvent::DoubleClick {
-            button: MouseButton::Left,
-            ..
-        } => {
-            click_generation.fetch_add(1, Ordering::AcqRel);
-            send_event(&sender, TrayEvent::OpenSettings);
-        }
-        _ => {}
     }));
 }
 
@@ -166,12 +147,6 @@ fn send_event(sender: &Arc<Mutex<Sender<TrayEvent>>>, event: TrayEvent) {
     if let Ok(sender) = sender.lock() {
         let _ = sender.send(event);
     }
-}
-
-fn single_click_delay() -> Duration {
-    // SAFETY: GetDoubleClickTime has no parameters and simply reads the
-    // current user double-click time from the system.
-    Duration::from_millis(unsafe { GetDoubleClickTime() } as u64) + SINGLE_CLICK_DELAY_PADDING
 }
 
 fn tooltip_for_active(active: bool) -> &'static str {
