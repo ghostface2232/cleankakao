@@ -101,7 +101,6 @@ impl ProcessWatcher {
                     let cached_pid = *kakaotalk_pid.lock().unwrap();
 
                     match (was_running, pid_now) {
-                        // Steady state: nothing was running, nothing detected.
                         (false, None) => {}
 
                         // Fresh launch candidate. The PID may exist before the

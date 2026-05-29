@@ -41,10 +41,8 @@ pub const CAPTION_SIZE: f32 = 12.0;
 pub const ICON_SIZE: f32 = 14.0;
 pub const STATUS_DOT_SIZE: f32 = 10.0;
 
-// Fluent UI System Icons (Regular, 16px design size). Code points verified
-// against
+// Fluent UI System Icons (Regular, 16px design size). Code points verified against
 // https://raw.githubusercontent.com/microsoft/fluentui-system-icons/main/fonts/FluentSystemIcons-Regular.json
-// — earlier values were off; many didn't even point at glyphs that exist.
 pub const ICON_SHIELD: &str = "\u{EAC3}"; // ic_fluent_shield_16_regular
 pub const ICON_SETTINGS: &str = "\u{F6A8}"; // ic_fluent_settings_16_regular
 pub const ICON_INFO: &str = "\u{F4A2}"; // ic_fluent_info_16_regular

@@ -31,10 +31,8 @@ use crate::config::Config;
 use crate::constants::KAKAOTALK_EXE;
 use crate::win32::{class_name, is_window_visible, window_text};
 
-// Values mirrored from blurfx/KakaoTalkAdBlock's current main-view resizing
-// approach. The bottom ad strip is accounted for by shrinking the desired
-// main-view height by 31 px, while the lock-screen view only needs the small
-// shadow compensation on width.
+// The bottom ad strip is covered by shrinking the main-view height by 31 px;
+// the lock-screen view only needs the 2 px shadow compensation on width.
 const LAYOUT_SHADOW_PADDING: i32 = 2;
 const MAIN_VIEW_BOTTOM_PADDING: i32 = 31;
 
@@ -401,10 +399,6 @@ impl AdBlocker {
     }
 }
 
-// ===========================================================================
-// Window discovery
-// ===========================================================================
-
 pub fn find_kakaotalk_window() -> Option<HWND> {
     let titles: [PCWSTR; 3] = [w!("카카오톡"), w!("KakaoTalk"), w!("カカオトーク")];
     for title in titles {
@@ -447,10 +441,6 @@ unsafe extern "system" fn enum_top_level_by_image(hwnd: HWND, lparam: LPARAM) ->
     unsafe { *out = Some(hwnd) };
     BOOL(0)
 }
-
-// ===========================================================================
-// Enumeration and classification
-// ===========================================================================
 
 fn enum_descendants(parent: HWND) -> Vec<HWND> {
     let mut buf: Vec<HWND> = Vec::new();
@@ -498,10 +488,6 @@ fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
 
     near_bottom && wide_enough && exact_height
 }
-
-// ===========================================================================
-// Popup discovery
-// ===========================================================================
 
 struct PopupCtx {
     main_key: isize,
@@ -665,10 +651,6 @@ unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
     ctx.out.push(AdWindow::Popup { hwnd });
     BOOL(1)
 }
-
-// ===========================================================================
-// Win32 helpers
-// ===========================================================================
 
 fn window_pid(hwnd: HWND) -> u32 {
     let mut pid: u32 = 0;
