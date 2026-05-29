@@ -129,6 +129,18 @@ impl AdBlocker {
             return;
         }
 
+        // KakaoTalk can sit in the tray with its main window hidden but not
+        // iconic. OnlineMainView is a CEF-backed compositor surface; resizing
+        // it while the window is hidden leaves it black — and the hidden banner
+        // slot white — once the window is later shown, because CEF only repaints
+        // on its own paint cycle, not on our SetWindowPos/RedrawWindow. Defer
+        // until the window is actually visible; the WinEvent foreground/show
+        // hooks and the periodic fallback reapply as soon as it appears.
+        if !is_window_visible(main) {
+            debug!("apply_all: main window hidden (tray); deferring until visible");
+            return;
+        }
+
         let pid = window_pid(main);
         if pid == 0 || !process_image_is(pid, KAKAOTALK_EXE) {
             warn!("apply_all: main hwnd PID/image verification failed");
@@ -153,8 +165,12 @@ impl AdBlocker {
             return;
         }
 
+        // Defer while the window is minimized or hidden in the tray, for the
+        // same CEF-repaint reason as `apply_all`. The saved state is left intact
+        // (not drained), so the pending restore replays once the window is shown
+        // again via the WinEvent burst.
         if let Some(main) = self.main_hwnd().or_else(|| self.locate_main_window())
-            && is_iconic(main)
+            && (is_iconic(main) || !is_window_visible(main))
         {
             return;
         }
