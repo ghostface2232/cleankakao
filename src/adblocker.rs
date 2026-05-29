@@ -22,15 +22,14 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetParent,
-    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow,
-    IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
-    ShowWindow, WS_POPUP,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, SW_HIDE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use crate::config::Config;
 use crate::constants::KAKAOTALK_EXE;
-use crate::win32::{class_name, window_text};
+use crate::win32::{class_name, is_window_visible, window_text};
 
 // Values mirrored from blurfx/KakaoTalkAdBlock's current main-view resizing
 // approach. The bottom ad strip is accounted for by shrinking the desired
@@ -696,11 +695,6 @@ fn is_window(hwnd: HWND) -> bool {
     // SAFETY: IsWindow accepts any handle value and returns FALSE for
     // invalid handles.
     unsafe { IsWindow(Some(hwnd)) }.as_bool()
-}
-
-fn is_window_visible(hwnd: HWND) -> bool {
-    // SAFETY: IsWindowVisible accepts any HWND value.
-    unsafe { IsWindowVisible(hwnd) }.as_bool()
 }
 
 fn is_iconic(hwnd: HWND) -> bool {

@@ -1,5 +1,5 @@
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowTextW};
+use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowTextW, IsWindowVisible};
 
 pub fn class_name(hwnd: HWND) -> String {
     let mut buf = [0u16; 256];
@@ -21,4 +21,9 @@ pub fn window_text(hwnd: HWND) -> String {
         return String::new();
     }
     String::from_utf16_lossy(&buf[..len.min(buf.len())])
+}
+
+pub fn is_window_visible(hwnd: HWND) -> bool {
+    // SAFETY: IsWindowVisible accepts any HWND value.
+    unsafe { IsWindowVisible(hwnd) }.as_bool()
 }

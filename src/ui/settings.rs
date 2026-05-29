@@ -29,8 +29,8 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, EnumWindows, GetWindowThreadProcessId, ICON_BIG, IsWindowVisible,
-    LR_DEFAULTCOLOR, SendMessageW, WM_SETICON,
+    CreateIconFromResourceEx, EnumWindows, GetWindowThreadProcessId, ICON_BIG, LR_DEFAULTCOLOR,
+    SendMessageW, WM_SETICON,
 };
 use windows::core::BOOL;
 
@@ -38,7 +38,7 @@ use super::theme::{self, Mode, Tokens};
 use crate::config::Config;
 use crate::ico;
 use crate::process_watcher;
-use crate::win32::window_text;
+use crate::win32::{is_window_visible, window_text};
 
 const REPO_URL: &str = "https://github.com/ghostface2232/cleankakao";
 const WINDOW_TITLE: &str = " ";
@@ -876,11 +876,6 @@ fn logo_image_handle() -> Option<image_widget::Handle> {
             ))
         })
         .clone()
-}
-
-fn is_window_visible(hwnd: HWND) -> bool {
-    // SAFETY: IsWindowVisible accepts any HWND value.
-    unsafe { IsWindowVisible(hwnd) }.as_bool()
 }
 
 fn force_settings_renderer() {
