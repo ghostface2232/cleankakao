@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::adblocker::AdBlocker;
+use crate::process_watcher;
 use crate::win32::{class_name, window_text};
 
 const EVENT_LOOP_WAIT: Duration = Duration::from_millis(50);
@@ -32,13 +33,12 @@ pub fn start_reapply_worker(
     adblocker: Arc<Mutex<AdBlocker>>,
     blocking_enabled: Arc<AtomicBool>,
     kakaotalk_running: Arc<AtomicBool>,
-    kakaotalk_pid: Arc<Mutex<Option<u32>>>,
     app_running: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("window-event-reapply".into())
         .spawn(move || {
-            let mut hooks: Option<WinEventHooks> = None;
+            let mut hooks: Vec<WinEventHooks> = Vec::new();
             let mut last_pid_refresh = Instant::now() - PID_REFRESH_INTERVAL;
             let mut burst_until: Option<Instant> = None;
 
@@ -50,16 +50,19 @@ pub fn start_reapply_worker(
                         .lock()
                         .map(|adblocker| adblocker.has_pending_restore())
                         .unwrap_or(false);
-                    let desired_pid = if kakaotalk_running.load(Ordering::Acquire)
+                    let mut desired_pids = if kakaotalk_running.load(Ordering::Acquire)
                         && (blocking_enabled.load(Ordering::Acquire) || has_pending_restore)
                     {
-                        *kakaotalk_pid.lock().unwrap()
+                        process_watcher::find_kakaotalk_main_processes()
                     } else {
-                        None
+                        Vec::new()
                     };
+                    desired_pids.sort_unstable();
 
-                    if hooks.as_ref().map(|h| h.pid) != desired_pid {
-                        hooks = desired_pid.and_then(install_hooks);
+                    let mut installed_pids: Vec<_> = hooks.iter().map(|hook| hook.pid).collect();
+                    installed_pids.sort_unstable();
+                    if installed_pids != desired_pids {
+                        hooks = desired_pids.into_iter().filter_map(install_hooks).collect();
                         clear_event_pending();
                     }
                 }

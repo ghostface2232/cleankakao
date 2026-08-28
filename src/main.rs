@@ -93,7 +93,6 @@ fn main() {
 
     let watcher = ProcessWatcher::from_config(&loaded_config);
     let kakaotalk_running = watcher.is_running_handle();
-    let kakaotalk_pid = watcher.pid_handle();
 
     {
         let adblocker = Arc::clone(&adblocker);
@@ -125,7 +124,6 @@ fn main() {
         Arc::clone(&adblocker),
         Arc::clone(&blocking_enabled),
         Arc::clone(&kakaotalk_running),
-        Arc::clone(&kakaotalk_pid),
         Arc::clone(&app_running),
     );
     let _config_reload_worker =
