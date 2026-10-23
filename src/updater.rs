@@ -271,6 +271,29 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Exercises the actual HTTPS/TLS and JSON path without showing a toast.
+    /// Requires network access and an available GitHub API rate limit.
+    #[test]
+    #[ignore]
+    fn github_update_check_live() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let checker =
+            UpdateChecker::new(DEFAULT_REPO_OWNER, DEFAULT_REPO_NAME, Version::new(0, 0, 0));
+        let release = runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(15), checker.check_latest_version()).await
+            })
+            .expect("GitHub update check timed out")
+            .expect("GitHub update check failed or no published release was returned");
+
+        assert!(release.version > Version::new(0, 0, 0));
+        assert!(release.download_url.starts_with(RELEASES_URL));
+        println!("GitHub HTTPS update check succeeded: {}", release.version);
+    }
+
     #[test]
     fn parses_newer_release_info() {
         let info = parse_release_info(

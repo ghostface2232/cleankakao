@@ -1,6 +1,6 @@
 // UI module: iced-based settings window.
 //
-// The settings window is launched as a child process because iced 0.13/winit
+// The settings window is launched as a child process because iced 0.14/winit
 // 0.30 require the EventLoop to live on the host's main thread on Windows,
 // and our main thread is already committed to the tray's Win32 message loop.
 // The child writes config changes straight to

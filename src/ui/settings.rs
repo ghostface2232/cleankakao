@@ -1,4 +1,4 @@
-// Settings window built with iced 0.13.
+// Settings window built with iced 0.14.
 //
 // The window is launched from the tray thread via [`super::open_settings_window`]
 // and runs an isolated iced application: closing it (via the `닫기` button or
@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use iced::alignment;
-use iced::application::Appearance;
+use iced::theme::Style;
 use iced::widget::{
     Space, button, column, container, image as image_widget, mouse_area, row, text,
 };
@@ -186,9 +186,9 @@ impl State {
 
     /// Application-level appearance. The background must be fully
     /// transparent so the DWM Mica backdrop renders behind iced's content.
-    fn style(&self, _theme: &Theme) -> Appearance {
+    fn style(&self, _theme: &Theme) -> Style {
         let tokens = Tokens::for_mode(self.mode);
-        Appearance {
+        Style {
             background_color: Color::TRANSPARENT,
             text_color: tokens.text_primary,
         }
@@ -224,7 +224,7 @@ impl State {
 
         let header = column![
             logo.map(Element::from)
-                .unwrap_or_else(|| Space::new(LOGO_SIZE, LOGO_SIZE).into()),
+                .unwrap_or_else(|| Space::new().width(LOGO_SIZE).height(LOGO_SIZE).into()),
             header_text,
         ]
         .spacing(8);
@@ -306,7 +306,7 @@ impl State {
             .padding([6, 12])
             .style(theme::secondary_button(tokens))
             .on_press(Message::OpenRepo),
-            Space::with_width(Length::Fill),
+            Space::new().width(Length::Fill),
             button(text("닫기").size(theme::BODY_SIZE))
                 .padding([6, 16])
                 .style(theme::primary_button(tokens))
@@ -341,7 +341,7 @@ impl State {
 /// it — `mouse_area` turns a press on the empty region into a window drag.
 fn title_bar<'a>(tokens: Tokens) -> Element<'a, Message> {
     let drag_region = mouse_area(
-        container(Space::new(Length::Fill, Length::Fill))
+        container(Space::new().width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill),
     )
@@ -365,15 +365,11 @@ fn caption_button<'a>(
 ) -> Element<'a, Message> {
     // No explicit glyph color: it inherits the button's `text_color`, letting
     // the close button flip to white over its red hover fill.
-    let label = container(
-        text(glyph)
-            .font(theme::ICON_FONT)
-            .size(CAPTION_ICON_SIZE),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(alignment::Horizontal::Center)
-    .align_y(alignment::Vertical::Center);
+    let label = container(text(glyph).font(theme::ICON_FONT).size(CAPTION_ICON_SIZE))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center);
 
     button(label)
         .width(Length::Fixed(CAPTION_BUTTON_WIDTH))
@@ -445,13 +441,13 @@ fn pill_toggle<'a>(
     progress: f32,
     to_message: fn(bool) -> Message,
 ) -> Element<'a, Message> {
-    let thumb = container(Space::new(0.0, 0.0))
+    let thumb = container(Space::new().width(0.0).height(0.0))
         .width(Length::Fixed(PILL_THUMB))
         .height(Length::Fixed(PILL_THUMB))
         .style(theme::pill_thumb(PILL_THUMB));
 
     let thumb_offset = PILL_TRAVEL * progress.clamp(0.0, 1.0);
-    let thumb_row = row![Space::with_width(Length::Fixed(thumb_offset)), thumb];
+    let thumb_row = row![Space::new().width(Length::Fixed(thumb_offset)), thumb];
 
     let track = container(thumb_row)
         .width(Length::Fixed(PILL_WIDTH))
@@ -645,47 +641,53 @@ fn open_url(url: &str) {
 }
 
 /// Run the settings window. Blocks until the user closes the window. Intended
-/// to be called from the main thread of the `--settings` subprocess (iced 0.13
+/// to be called from the main thread of the `--settings` subprocess (iced 0.14
 /// / winit 0.30 require the EventLoop to live on the main thread on Windows).
 pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
     let mode = detect_system_mode();
     force_settings_renderer();
     // iced exposes no way to grab the underlying HWND, so the Mica setup
     // thread waits for the window to appear by title and then talks to DWM
-    // directly. Spawned before `iced::application().run_with(...)` because
+    // directly. Spawned before `iced::application().run()` because
     // that call takes over the main thread.
     spawn_mica_setup(WINDOW_TITLE, mode);
 
-    iced::application(WINDOW_TITLE, State::update, State::view)
-        .theme(State::theme)
-        .style(State::style)
-        .subscription(State::subscription)
-        .settings(Settings {
-            id: Some("cleankakao.settings".to_string()),
-            fonts: vec![
-                theme::FLUENT_ICONS_BYTES.into(),
-                theme::PRETENDARD_MEDIUM_BYTES.into(),
-                theme::PRETENDARD_SEMIBOLD_BYTES.into(),
-            ],
-            default_font: theme::BODY_FONT,
-            default_text_size: Pixels(theme::BODY_SIZE),
-            antialiasing: true,
-        })
-        .window(window::Settings {
-            size: WINDOW_SIZE,
-            min_size: Some(WINDOW_SIZE),
-            max_size: Some(WINDOW_SIZE),
-            resizable: false,
-            decorations: false,
-            transparent: true,
-            ..Default::default()
-        })
-        .run_with(move || {
+    iced::application(
+        move || {
             (
                 State::new(config_handle.clone()),
-                window::get_latest().map(Message::WindowOpened),
+                window::latest().map(Message::WindowOpened),
             )
-        })
+        },
+        State::update,
+        State::view,
+    )
+    .title(WINDOW_TITLE)
+    .theme(State::theme)
+    .style(State::style)
+    .subscription(State::subscription)
+    .settings(Settings {
+        id: Some("cleankakao.settings".to_string()),
+        fonts: vec![
+            theme::FLUENT_ICONS_BYTES.into(),
+            theme::PRETENDARD_MEDIUM_BYTES.into(),
+            theme::PRETENDARD_SEMIBOLD_BYTES.into(),
+        ],
+        default_font: theme::BODY_FONT,
+        default_text_size: Pixels(theme::BODY_SIZE),
+        antialiasing: true,
+        ..Default::default()
+    })
+    .window(window::Settings {
+        size: WINDOW_SIZE,
+        min_size: Some(WINDOW_SIZE),
+        max_size: Some(WINDOW_SIZE),
+        resizable: false,
+        decorations: false,
+        transparent: true,
+        ..Default::default()
+    })
+    .run()
 }
 
 /// Poll for the settings window by title from a worker thread, then apply

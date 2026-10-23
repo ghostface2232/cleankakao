@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/ghostface2232/cleankakao"
 
 [dependencies]
-windows = { version = ">=0.59, <=0.62", features = [
+windows = { version = "0.62", features = [
     "Data_Xml_Dom",
     "UI_Notifications",
     "Win32_Foundation",
@@ -23,14 +23,14 @@ windows = { version = ">=0.59, <=0.62", features = [
     "Win32_Security",
     "Win32_UI_Controls",
 ] }
-tray-icon = "0.21"
-muda = "0.17"
-iced = { version = "0.13", features = ["tokio", "image"] }
+tray-icon = "0.26"
+muda = "0.21"
+iced = { version = "0.14", features = ["tokio", "image-without-codecs"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-reqwest = { version = "0.12", features = ["json"] }
+toml = "1.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "http2", "charset", "system-proxy"] }
 tokio = { version = "1", features = ["full"] }
-dirs = "6"
+dirs = "7"
 semver = "1"
 log = "0.4"
 env_logger = "0.11"

@@ -128,6 +128,10 @@ pub fn theme_for(mode: Mode) -> Theme {
         text: t.text_primary,
         primary: t.accent,
         success: t.success,
+        warning: match mode {
+            Mode::Dark => Palette::DARK.warning,
+            Mode::Light => Palette::LIGHT.warning,
+        },
         danger: t.danger,
     };
     let name = match mode {
@@ -146,6 +150,7 @@ pub fn root_container(tokens: Tokens) -> impl Fn(&Theme) -> container::Style + '
         text_color: Some(tokens.text_primary),
         border: Border::default(),
         shadow: Shadow::default(),
+        ..Default::default()
     }
 }
 
@@ -159,6 +164,7 @@ pub fn card_container(tokens: Tokens) -> impl Fn(&Theme) -> container::Style + '
             radius: 8.0.into(),
         },
         shadow: Shadow::default(),
+        ..Default::default()
     }
 }
 
@@ -181,6 +187,7 @@ pub fn primary_button(
                 radius: 4.0.into(),
             },
             shadow: Shadow::default(),
+            ..Default::default()
         }
     }
 }
@@ -204,6 +211,7 @@ pub fn secondary_button(
                 radius: 4.0.into(),
             },
             shadow: Shadow::default(),
+            ..Default::default()
         }
     }
 }
@@ -231,8 +239,12 @@ pub fn caption_button(
             // Subtle low-opacity gray overlay so the highlight reads clearly on
             // either the light or dark Mica surface. `text_secondary` is a gray
             // in both palettes, so a low alpha gives a neutral wash.
-            button::Status::Hovered => (with_alpha(tokens.text_secondary, 0.18), tokens.text_primary),
-            button::Status::Pressed => (with_alpha(tokens.text_secondary, 0.28), tokens.text_primary),
+            button::Status::Hovered => {
+                (with_alpha(tokens.text_secondary, 0.18), tokens.text_primary)
+            }
+            button::Status::Pressed => {
+                (with_alpha(tokens.text_secondary, 0.28), tokens.text_primary)
+            }
         };
         button::Style {
             background: Some(Background::Color(bg)),
@@ -243,6 +255,7 @@ pub fn caption_button(
                 radius: 0.0.into(),
             },
             shadow: Shadow::default(),
+            ..Default::default()
         }
     }
 }
@@ -261,6 +274,7 @@ pub fn pill_track(tokens: Tokens, on: bool, height: f32) -> impl Fn(&Theme) -> c
             radius: (height / 2.0).into(),
         },
         shadow: Shadow::default(),
+        ..Default::default()
     }
 }
 
@@ -274,6 +288,7 @@ pub fn pill_thumb(diameter: f32) -> impl Fn(&Theme) -> container::Style {
             radius: (diameter / 2.0).into(),
         },
         shadow: Shadow::default(),
+        ..Default::default()
     }
 }
 

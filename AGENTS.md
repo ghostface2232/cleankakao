@@ -18,10 +18,10 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 ## Tech Stack
 - **Language**: Rust 1.95
 - **Win32 API**: `windows` crate v0.62 — `FindWindowW`, `EnumWindows`, `EnumChildWindows`, `EnumThreadWindows`, `ShowWindow`, `SetWindowPos`, `SetWinEventHook`, `CreateToolhelp32Snapshot`.
-- **System tray**: `tray-icon` v0.21 + `muda` v0.17 (context menu).
-- **Settings window UI**: `iced` v0.13 with a custom WinUI3 theme.
-- **Settings storage**: `serde` v1 + `toml` v0.8.
-- **Automatic updates**: `reqwest` v0.12 against the GitHub Releases API. Current behavior checks the latest release, shows a Windows toast notification, and opens the GitHub Releases page from the toast; it does not self-replace the executable.
+- **System tray**: `tray-icon` v0.26 + `muda` v0.21 (context menu).
+- **Settings window UI**: `iced` v0.14 with a custom WinUI3 theme.
+- **Settings storage**: `serde` v1 + `toml` v1.1.
+- **Automatic updates**: `reqwest` v0.13 with native TLS against the GitHub Releases API. Current behavior checks the latest release, shows a Windows toast notification, and opens the GitHub Releases page from the toast; it does not self-replace the executable.
 - **Build / deployment**: `cargo` + `winres` for Windows executable metadata + GitHub Actions tag releases.
 
 ## Project Layout
