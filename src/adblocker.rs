@@ -36,11 +36,11 @@ use crate::win32::{class_name, is_window_visible, window_text};
 const LAYOUT_SHADOW_PADDING: i32 = 2;
 const MAIN_VIEW_BOTTOM_PADDING: i32 = 31;
 
-// Conservative fallback for a direct empty EVA_ChildWindow ad slot. In
-// KakaoTalk 25.x this bottom banner is consistently 91 px tall across
-// 1080p/1440p/2160p layouts, so keep the classifier tight to avoid hiding
-// legitimate KakaoTalk panes that merely look like small empty windows.
-const DIRECT_BANNER_HEIGHT: i32 = 91;
+// Conservative fallback for a direct empty EVA_ChildWindow ad slot. Retain
+// the legacy 91 px height and accept the observed 100 logical px slot
+// (150 physical px at 150% scaling). Keep both height bands tight to avoid
+// hiding legitimate KakaoTalk panes that merely look like small empty windows.
+const DIRECT_BANNER_HEIGHTS: [i32; 2] = [91, 100];
 const DIRECT_BANNER_HEIGHT_TOLERANCE_PX: i32 = 2;
 const DIRECT_BANNER_MIN_WIDTH_RATIO: f32 = 0.70;
 const DIRECT_BANNER_BOTTOM_TOLERANCE_PX: i32 = 12;
@@ -484,7 +484,9 @@ fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
     let height = rect.bottom - rect.top;
     let near_bottom = (main_rect.bottom - rect.bottom).abs() <= DIRECT_BANNER_BOTTOM_TOLERANCE_PX;
     let wide_enough = (width as f32) >= (main_width as f32) * DIRECT_BANNER_MIN_WIDTH_RATIO;
-    let exact_height = (height - DIRECT_BANNER_HEIGHT).abs() <= DIRECT_BANNER_HEIGHT_TOLERANCE_PX;
+    let exact_height = DIRECT_BANNER_HEIGHTS
+        .iter()
+        .any(|expected| (height - expected).abs() <= DIRECT_BANNER_HEIGHT_TOLERANCE_PX);
 
     near_bottom && wide_enough && exact_height
 }
@@ -767,9 +769,29 @@ mod tests {
     fn bottom_banner_rect_rejects_wrong_height_bottom_or_width() {
         let main = rect(0, 0, 600, 800);
 
-        assert!(!is_bottom_banner_rect(&main, &rect(0, 700, 600, 800)));
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 680, 600, 800)));
         assert!(!is_bottom_banner_rect(&main, &rect(0, 709, 600, 780)));
         assert!(!is_bottom_banner_rect(&main, &rect(0, 709, 419, 800)));
+    }
+
+    #[test]
+    fn bottom_banner_rect_accepts_only_supported_height_bands() {
+        let main = rect(0, 0, 600, 800);
+
+        for height in [89, 91, 93, 98, 100, 102] {
+            assert!(is_bottom_banner_rect(
+                &main,
+                &rect(0, 800 - height, 600, 800)
+            ));
+        }
+        for height in [88, 94, 97, 103, 120, 150] {
+            assert!(!is_bottom_banner_rect(
+                &main,
+                &rect(0, 800 - height, 600, 800)
+            ));
+        }
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 650, 419, 800)));
+        assert!(!is_bottom_banner_rect(&main, &rect(0, 630, 600, 780)));
     }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
