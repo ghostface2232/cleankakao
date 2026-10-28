@@ -26,7 +26,7 @@ static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 /// Spawn the settings window as a child process. No-op when an instance is
 /// already running. Returns immediately so the tray event loop is never
 /// blocked.
-pub fn open_settings_window(config: Arc<RwLock<Config>>) {
+pub fn open_settings_window(config: Arc<RwLock<Config>>, check_updates: bool) {
     if SETTINGS_OPEN.swap(true, Ordering::AcqRel) {
         info!("settings window already open; ignoring duplicate request");
         return;
@@ -41,7 +41,20 @@ pub fn open_settings_window(config: Arc<RwLock<Config>>) {
         }
     };
 
-    let child = match Command::new(&exe).arg(SETTINGS_SUBPROCESS_FLAG).spawn() {
+    // SAFETY: GetCurrentThreadId has no preconditions; called on the tray thread.
+    let host_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    let mut command = Command::new(&exe);
+    command.arg(SETTINGS_SUBPROCESS_FLAG);
+    if check_updates {
+        command.arg("--check-updates");
+    }
+    let child = match command
+        .arg("--host-pid")
+        .arg(std::process::id().to_string())
+        .arg("--host-thread")
+        .arg(host_thread.to_string())
+        .spawn()
+    {
         Ok(child) => child,
         Err(e) => {
             warn!("settings: failed to spawn subprocess: {e}");
