@@ -102,6 +102,7 @@ pub struct State {
 #[derive(Debug, Clone)]
 pub enum Message {
     UpdateAction,
+    UpdateCheckRequested,
     UpdateChecked(Result<Option<ReleaseInfo>, String>),
     UpdatePrepared(Result<(), String>),
     ToggleAdBlock(bool),
@@ -138,6 +139,15 @@ impl State {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::UpdateCheckRequested if !self.update_busy => {
+                // A tray check must never apply a cached release. Installation
+                // remains a separate, deliberate click in the settings window.
+                self.available_update = None;
+                self.update_busy = true;
+                self.update_status = "업데이트 확인 중…".into();
+                return check_update_task();
+            }
+            Message::UpdateCheckRequested => {}
             Message::UpdateAction if !self.update_busy => {
                 self.update_busy = true;
                 if let Some(release) = self.available_update.take() {
@@ -210,6 +220,9 @@ impl State {
             Message::StatusTick => {
                 self.kakaotalk_running = process_watcher::find_kakaotalk_process().is_some();
                 self.last_check = now_hhmm();
+                if super::take_update_request() {
+                    return self.update(Message::UpdateCheckRequested);
+                }
             }
             Message::AnimationTick(now) => {
                 self.toggle_animation.update(now);
@@ -721,6 +734,7 @@ fn open_url(url: &str) {
 pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
     let mode = detect_system_mode();
     force_settings_renderer();
+    super::listen_for_update_requests();
     // iced exposes no way to grab the underlying HWND, so the Mica setup
     // thread waits for the window to appear by title and then talks to DWM
     // directly. Spawned before `iced::application().run()` because
@@ -982,5 +996,43 @@ fn force_settings_renderer() {
     // access is happening.
     unsafe {
         std::env::set_var("ICED_BACKEND", "tiny-skia");
+    }
+}
+
+#[cfg(test)]
+mod update_request_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_tray_check_works_with_auto_checks_disabled_and_never_installs_cached_release() {
+        let config = Config {
+            check_update: false,
+            ..Config::default()
+        };
+        let mut state = State::new(Arc::new(RwLock::new(config)));
+        state.available_update = Some(ReleaseInfo {
+            version: semver::Version::new(99, 0, 0),
+            download_url: String::new(),
+            sha256: String::new(),
+            size: 1,
+            release_url: String::new(),
+            release_notes: String::new(),
+            published_at: String::new(),
+        });
+        let _task = state.update(Message::UpdateCheckRequested);
+        assert!(state.update_busy);
+        assert!(state.available_update.is_none());
+        assert_eq!(state.update_status, "업데이트 확인 중…");
+        assert!(!state.config.check_update);
+    }
+
+    #[test]
+    fn tray_check_does_not_interrupt_an_update_in_progress() {
+        let mut state = State::new(Arc::new(RwLock::new(Config::default())));
+        state.update_busy = true;
+        state.update_status = "다운로드 및 검증 중…".into();
+        let _task = state.update(Message::UpdateCheckRequested);
+        assert!(state.update_busy);
+        assert_eq!(state.update_status, "다운로드 및 검증 중…");
     }
 }
