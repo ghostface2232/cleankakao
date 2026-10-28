@@ -9,7 +9,6 @@ mod ico;
 mod process_watcher;
 mod tray;
 mod ui;
-mod update_install;
 mod updater;
 mod win32;
 mod window_events;
@@ -22,7 +21,7 @@ use std::time::Duration;
 
 use adblocker::AdBlocker;
 use config::Config;
-use log::{error, warn};
+use log::{error, info, warn};
 use process_watcher::ProcessWatcher;
 use tray::{Tray, TrayEvent};
 use updater::{DEFAULT_UPDATE_CHECK_INTERVAL, UpdateChecker};
@@ -51,12 +50,6 @@ pub const SETTINGS_SUBPROCESS_FLAG: &str = "--settings";
 
 fn main() {
     env_logger::init();
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|arg| arg == update_install::HELPER_FLAG) {
-        update_install::run_helper();
-        return;
-    }
-    update_install::cleanup(&args);
 
     // iced/winit insists the EventLoop be built on the main thread (panics
     // otherwise on Windows). Our main thread already owns the tray Win32
@@ -142,10 +135,6 @@ fn main() {
         Arc::clone(&config),
         Arc::clone(&app_running),
     );
-
-    if args.iter().any(|arg| arg == "--updated") {
-        ui::open_settings_window(Arc::clone(&config), false);
-    }
 
     run_message_loop(
         &tray_events,
@@ -287,7 +276,6 @@ fn run_message_loop(
     }
 
     app_running.store(false, Ordering::Release);
-    restore_adblocker(&adblocker);
 }
 
 fn drain_config_updates(
@@ -360,8 +348,8 @@ fn drain_tray_events(
                     restore_adblocker(adblocker);
                 }
             }
-            TrayEvent::OpenSettings => ui::open_settings_window(Arc::clone(config), false),
-            TrayEvent::CheckForUpdates => ui::open_settings_window(Arc::clone(config), true),
+            TrayEvent::OpenSettings => ui::open_settings_window(Arc::clone(config)),
+            TrayEvent::CheckForUpdates => check_for_updates(),
             TrayEvent::Quit => {
                 app_running.store(false, Ordering::Release);
                 restore_adblocker(adblocker);
@@ -408,6 +396,26 @@ fn run_settings_subprocess() {
     if let Err(e) = ui::settings::run(config) {
         error!("settings window failed: {e}");
     }
+}
+
+fn check_for_updates() {
+    thread::spawn(|| {
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!("failed to create tokio runtime for updater: {e}");
+                return;
+            }
+        };
+
+        let updater = UpdateChecker::current();
+        if let Some(info) = runtime.block_on(updater.check_latest_version()) {
+            info!("update available: {}", info.version);
+            updater.notify_update(&info);
+        } else {
+            info!("no update available");
+        }
+    });
 }
 
 fn sync_auto_start(enabled: bool) -> Result<(), String> {

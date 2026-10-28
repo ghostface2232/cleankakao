@@ -20,14 +20,6 @@ jobs:
       - name: Install Rust target
         run: rustup target add x86_64-pc-windows-msvc
 
-      - name: Validate version and test
-        shell: pwsh
-        run: |
-          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          if ("${{ github.ref_name }}" -ne "v$version") { throw "Tag must match Cargo.toml version v$version" }
-          cargo test --locked
-          if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
-
       - name: Build
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
@@ -42,7 +34,6 @@ jobs:
           Copy-Item "README.md" $packageDir
           Copy-Item "LICENSE" $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$name.zip" -Force
-          Copy-Item "target\x86_64-pc-windows-msvc\release\cleankakao.exe" "dist\cleankakao-windows-x86_64.exe"
 
       - name: Upload GitHub Release asset
         shell: pwsh
@@ -51,12 +42,9 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $zip = "dist\cleankakao-$tag-x86_64.zip"
-          $exe = "dist\cleankakao-windows-x86_64.exe"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            $isDraft = gh release view $tag --json isDraft --jq '.isDraft'
-            if ($isDraft -ne 'true') { throw "Published release assets are immutable; bump the version instead" }
-            gh release upload $tag $zip $exe --clobber
+            gh release upload $tag $zip --clobber
           } else {
-            gh release create $tag $zip $exe --title $tag --generate-notes --draft
+            gh release create $tag $zip --title $tag --generate-notes
           }

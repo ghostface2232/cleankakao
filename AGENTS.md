@@ -21,7 +21,7 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
 - **System tray**: `tray-icon` v0.26 + `muda` v0.21 (context menu).
 - **Settings window UI**: `iced` v0.14 with a custom WinUI3 theme.
 - **Settings storage**: `serde` v1 + `toml` v1.1.
-- **Automatic updates**: `reqwest` v0.13 with native TLS against GitHub Releases. Automatic checks notify; settings offers manual check and deliberate download/apply/restart. Only matching-architecture EXE assets with a GitHub SHA-256 digest are offered. A copied helper waits for settings/tray exit, replaces the portable EXE with rollback on replacement/launch failure, and restarts with `--updated`.
+- **Automatic updates**: `reqwest` v0.13 with native TLS against the GitHub Releases API. Current behavior checks the latest release, shows a Windows toast notification, and opens the GitHub Releases page from the toast; it does not self-replace the executable.
 - **Build / deployment**: `cargo` + `winres` for Windows executable metadata + GitHub Actions tag releases.
 
 ## Project Layout
@@ -38,9 +38,8 @@ Walks the KakaoTalk window hierarchy via the Win32 API, identifies ad child wind
   - `settings.rs` — window state + `Message` enum.
   - `theme.rs` — custom WinUI3-style theme.
 - `src/updater.rs` — GitHub Releases update check, periodic update worker, and Windows toast notification.
-- `src/update_install.rs` — verified download handoff, helper process, portable EXE replacement/rollback, and staging cleanup.
 - `build.rs` — embeds Windows executable resources such as icon and version metadata.
-- `.github/workflows/release.yml` — version-validated tag build/test, ZIP plus `cleankakao-windows-x86_64.exe` upload to a draft release. Publish manually; never replace published assets. Asset names must match `updater.rs` process-architecture selection.
+- `.github/workflows/release.yml` — tag-triggered Windows release build and GitHub Release asset upload.
 - `assets/` — build-time embedded icons and fonts: `icon_active.ico`, `icon_inactive.ico`, `fonts/FluentSystemIcons-Regular.ttf`, `fonts/PretendardJP-Medium.otf`, and `fonts/PretendardJP-SemiBold.otf`.
 
 ## Build & Run

@@ -26,9 +26,6 @@ const TOAST_APP_ID: &str = "CleanKakao";
 pub struct ReleaseInfo {
     pub version: Version,
     pub download_url: String,
-    pub sha256: String,
-    pub size: u64,
-    pub release_url: String,
     pub release_notes: String,
     pub published_at: String,
 }
@@ -47,20 +44,6 @@ struct GitHubRelease {
     html_url: String,
     body: Option<String>,
     published_at: Option<String>,
-    #[serde(default)]
-    assets: Vec<GitHubAsset>,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    prerelease: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
-    digest: Option<String>,
-    size: u64,
 }
 
 impl UpdateChecker {
@@ -82,15 +65,11 @@ impl UpdateChecker {
             repo_owner,
             repo_name,
             current_version,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
-                .connect_timeout(Duration::from_secs(15))
-                .build()
-                .expect("failed to build update HTTP client"),
+            client: reqwest::Client::new(),
         }
     }
 
-    pub async fn check_latest_version(&self) -> Result<Option<ReleaseInfo>, String> {
+    pub async fn check_latest_version(&self) -> Option<ReleaseInfo> {
         let url = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
             self.repo_owner, self.repo_name
@@ -101,27 +80,26 @@ impl UpdateChecker {
             .get(url)
             .header(reqwest::header::USER_AGENT, USER_AGENT)
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .timeout(Duration::from_secs(30))
             .send()
             .await
         {
             Ok(response) => response,
             Err(e) => {
                 warn!("update check request failed: {e}");
-                return Err(e.to_string());
+                return None;
             }
         };
 
         if !response.status().is_success() {
             warn!("update check returned HTTP {}", response.status());
-            return Err(format!("GitHub HTTP {}", response.status()));
+            return None;
         }
 
         let latest = match response.json::<GitHubRelease>().await {
             Ok(release) => release,
             Err(e) => {
                 warn!("failed to parse update response: {e}");
-                return Err(e.to_string());
+                return None;
             }
         };
 
@@ -132,17 +110,17 @@ impl UpdateChecker {
         let note = release_note_preview(&info.release_notes);
         let body = if note.is_empty() {
             format!(
-                "새 버전 {}이 있습니다. 트레이 메뉴의 업데이트 확인에서 설치할 수 있습니다.",
+                "새 버전 {}이 있습니다. 클릭해서 GitHub Releases 페이지를 엽니다.",
                 info.version
             )
         } else {
             format!(
-                "새 버전 {}이 있습니다. {}\n트레이 메뉴의 업데이트 확인에서 설치할 수 있습니다.",
+                "새 버전 {}이 있습니다. {}\n클릭해서 GitHub Releases 페이지를 엽니다.",
                 info.version, note
             )
         };
 
-        if let Err(e) = show_windows_toast("CleanKakao 업데이트", &body, &info.release_url) {
+        if let Err(e) = show_windows_toast("CleanKakao 업데이트", &body, &info.download_url) {
             warn!("failed to show update toast: {e}");
         }
     }
@@ -177,7 +155,7 @@ impl UpdateChecker {
                         });
 
                     if check_enabled {
-                        if let Ok(Some(info)) = runtime.block_on(self.check_latest_version()) {
+                        if let Some(info) = runtime.block_on(self.check_latest_version()) {
                             info!(
                                 "update available: {}, published_at={}",
                                 info.version, info.published_at
@@ -230,13 +208,7 @@ fn show_windows_toast(title: &str, body: &str, launch_url: &str) -> windows::cor
     notifier.Show(&toast)
 }
 
-fn parse_release_info(
-    latest: GitHubRelease,
-    current_version: &Version,
-) -> Result<Option<ReleaseInfo>, String> {
-    if latest.draft || latest.prerelease {
-        return Ok(None);
-    }
+fn parse_release_info(latest: GitHubRelease, current_version: &Version) -> Option<ReleaseInfo> {
     let tag = latest.tag_name.trim_start_matches(['v', 'V']);
     let version = match Version::parse(tag) {
         Ok(version) => version,
@@ -245,7 +217,7 @@ fn parse_release_info(
                 "failed to parse latest release tag '{}': {e}",
                 latest.tag_name
             );
-            return Err(e.to_string());
+            return None;
         }
     };
 
@@ -254,81 +226,19 @@ fn parse_release_info(
             "no update available: current={}, latest={}",
             current_version, version
         );
-        return Ok(None);
+        return None;
     }
 
-    let asset_name = format!("cleankakao-windows-{}.exe", std::env::consts::ARCH);
-    let asset = latest
-        .assets
-        .into_iter()
-        .find(|asset| asset.name == asset_name)
-        .ok_or_else(|| format!("missing release asset: {asset_name}"))?;
-    let sha256 =
-        parse_digest(asset.digest.as_deref()).ok_or("missing or invalid SHA-256 digest")?;
-    let expected_prefix = format!("{RELEASES_URL}/download/");
-    if !asset.browser_download_url.starts_with(&expected_prefix)
-        || asset.size == 0
-        || asset.size > 100 * 1024 * 1024
-    {
-        return Err("invalid release asset URL or size".into());
-    }
-    Ok(Some(ReleaseInfo {
+    Some(ReleaseInfo {
         version,
-        download_url: asset.browser_download_url,
-        sha256,
-        size: asset.size,
-        release_url: if latest.html_url.is_empty() {
+        download_url: if latest.html_url.is_empty() {
             RELEASES_URL.to_string()
         } else {
             latest.html_url
         },
         release_notes: latest.body.unwrap_or_default(),
         published_at: latest.published_at.unwrap_or_default(),
-    }))
-}
-
-fn parse_digest(value: Option<&str>) -> Option<String> {
-    let hex = value?.strip_prefix("sha256:")?;
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| hex.to_ascii_lowercase())
-}
-
-impl UpdateChecker {
-    pub async fn download(
-        &self,
-        release: &ReleaseInfo,
-        path: &std::path::Path,
-    ) -> Result<(), String> {
-        use sha2::{Digest, Sha256};
-        use tokio::io::AsyncWriteExt;
-        let mut response = self
-            .client
-            .get(&release.download_url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?;
-        let mut file = tokio::fs::File::create(path)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut hash = Sha256::new();
-        let mut size = 0u64;
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-            size += chunk.len() as u64;
-            if size > release.size {
-                return Err("download exceeds release size".into());
-            }
-            hash.update(&chunk);
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        }
-        file.sync_all().await.map_err(|e| e.to_string())?;
-        if size != release.size || format!("{:x}", hash.finalize()) != release.sha256 {
-            return Err("release download failed SHA-256/size verification".into());
-        }
-        Ok(())
-    }
+    })
 }
 
 fn release_note_preview(release_notes: &str) -> String {
@@ -361,132 +271,96 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn download_verifies_bytes_and_rejects_corruption_truncation_and_http_errors() {
-        use sha2::{Digest, Sha256};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for scenario in 0..5 {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = [0u8; 4096];
-                let mut length = 0;
-                while !request[..length].ends_with(b"\r\n\r\n") {
-                    let count = socket.read(&mut request[length..]).await.unwrap();
-                    assert!(count > 0 && length + count < request.len());
-                    length += count;
-                }
-                let response = match scenario {
-                    2 => {
-                        "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nMZpayload"
-                    }
-                    3 => {
-                        "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    }
-                    _ => {
-                        "HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nMZpayload"
-                    }
-                };
-                socket.write_all(response.as_bytes()).await.unwrap();
-            });
-            let mut release = parse_release_info(release("v2.0.0"), &Version::new(1, 0, 0))
-                .unwrap()
-                .unwrap();
-            release.download_url = format!("http://{address}/asset");
-            release.size = if scenario == 4 { 2 } else { 9 };
-            release.sha256 = if scenario == 1 {
-                "00".repeat(32)
-            } else {
-                format!("{:x}", Sha256::digest(b"MZpayload"))
-            };
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("payload.exe");
-            let result = UpdateChecker::current().download(&release, &path).await;
-            assert_eq!(
-                result.is_ok(),
-                scenario == 0,
-                "scenario {scenario}: {result:?}"
-            );
-            if scenario == 0 {
-                assert_eq!(std::fs::read(path).unwrap(), b"MZpayload");
-            }
-            server.await.unwrap();
-        }
-    }
-
-    fn release(tag: &str) -> GitHubRelease {
-        GitHubRelease {
-            tag_name: tag.into(),
-            html_url: RELEASES_URL.into(),
-            body: Some("notes".into()),
-            published_at: None,
-            draft: false,
-            prerelease: false,
-            assets: vec![GitHubAsset {
-                name: format!("cleankakao-windows-{}.exe", std::env::consts::ARCH),
-                browser_download_url: format!("{RELEASES_URL}/download/{tag}/app.exe"),
-                digest: Some(format!("sha256:{}", "ab".repeat(32))),
-                size: 10,
-            }],
-        }
-    }
-
+    /// Exercises the actual HTTPS/TLS and JSON path without showing a toast.
+    /// Requires network access and an available GitHub API rate limit.
     #[test]
-    fn only_offers_verified_newer_stable_matching_asset() {
-        let current = Version::new(1, 0, 0);
-        let info = parse_release_info(release("v1.0.1"), &current)
-            .unwrap()
+    #[ignore]
+    fn github_update_check_live() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        assert_eq!(info.version, Version::new(1, 0, 1));
-        assert_eq!(info.sha256, "ab".repeat(32));
-        for tag in ["v1.0.0", "v0.9.0"] {
-            assert!(
-                parse_release_info(release(tag), &current)
-                    .unwrap()
-                    .is_none()
-            );
-        }
-        assert!(parse_release_info(release("latest"), &current).is_err());
-        let mut draft = release("v2.0.0");
-        draft.draft = true;
-        assert!(parse_release_info(draft, &current).unwrap().is_none());
-        let mut preview = release("v2.0.0-beta.1");
-        preview.prerelease = true;
-        assert!(parse_release_info(preview, &current).unwrap().is_none());
+        let checker =
+            UpdateChecker::new(DEFAULT_REPO_OWNER, DEFAULT_REPO_NAME, Version::new(0, 0, 0));
+        let release = runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(15), checker.check_latest_version()).await
+            })
+            .expect("GitHub update check timed out")
+            .expect("GitHub update check failed or no published release was returned");
+
+        assert!(release.version > Version::new(0, 0, 0));
+        assert!(release.download_url.starts_with(RELEASES_URL));
+        println!("GitHub HTTPS update check succeeded: {}", release.version);
     }
 
     #[test]
-    fn rejects_missing_wrong_architecture_or_unverifiable_assets() {
-        for mode in 0..5 {
-            let mut value = release("v2.0.0");
-            match mode {
-                0 => value.assets.clear(),
-                1 => value.assets[0].name = "other-architecture.exe".into(),
-                2 => value.assets[0].digest = None,
-                3 => value.assets[0].browser_download_url = "https://example.test/app.exe".into(),
-                _ => value.assets[0].size = 0,
-            }
-            assert!(parse_release_info(value, &Version::new(1, 0, 0)).is_err());
-        }
+    fn parses_newer_release_info() {
+        let info = parse_release_info(
+            GitHubRelease {
+                tag_name: "v1.2.3".to_string(),
+                html_url: "https://example.test/release".to_string(),
+                body: Some("notes".to_string()),
+                published_at: Some("2026-05-28T00:00:00Z".to_string()),
+            },
+            &Version::parse("1.2.2").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(info.version, Version::parse("1.2.3").unwrap());
+        assert_eq!(info.download_url, "https://example.test/release");
+        assert_eq!(info.release_notes, "notes");
+        assert_eq!(info.published_at, "2026-05-28T00:00:00Z");
     }
 
     #[test]
-    fn digest_requires_exact_sha256() {
-        for invalid in [None, Some(""), Some("sha256:abc"), Some("sha512:abc")] {
-            assert!(parse_digest(invalid).is_none());
-        }
+    fn ignores_same_or_older_release() {
+        let current = Version::parse("1.2.3").unwrap();
+
+        assert!(parse_release_info(release("1.2.3"), &current).is_none());
+        assert!(parse_release_info(release("1.2.2"), &current).is_none());
+    }
+
+    #[test]
+    fn ignores_invalid_release_tag() {
+        assert!(parse_release_info(release("latest"), &Version::parse("1.0.0").unwrap()).is_none());
+    }
+
+    #[test]
+    fn falls_back_to_releases_url_when_html_url_is_empty() {
+        let mut release = release("1.0.1");
+        release.html_url.clear();
+
+        let info = parse_release_info(release, &Version::parse("1.0.0").unwrap()).unwrap();
+
+        assert_eq!(info.download_url, RELEASES_URL);
+    }
+
+    #[test]
+    fn previews_first_non_empty_release_note_line() {
         assert_eq!(
-            parse_digest(Some(&format!("sha256:{}", "AB".repeat(32)))),
-            Some("ab".repeat(32))
+            release_note_preview("\n  \n  First line\nSecond line"),
+            "First line"
         );
-        assert!(parse_digest(Some(&format!("sha256:{}", "gg".repeat(32)))).is_none());
+
+        let long = "a".repeat(120);
+        assert_eq!(release_note_preview(&long).chars().count(), 90);
     }
 
     #[test]
-    fn toast_text_is_escaped_and_preview_is_bounded() {
-        assert_eq!(escape_xml("<a>&\"'"), "&lt;a&gt;&amp;&quot;&apos;");
-        assert_eq!(release_note_preview("\n  first\nsecond"), "first");
-        assert_eq!(release_note_preview(&"가".repeat(120)).chars().count(), 90);
+    fn escapes_xml_special_characters() {
+        assert_eq!(
+            escape_xml("<tag a=\"b\">Tom & 'Jerry'</tag>"),
+            "&lt;tag a=&quot;b&quot;&gt;Tom &amp; &apos;Jerry&apos;&lt;/tag&gt;"
+        );
+    }
+
+    fn release(tag_name: &str) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag_name.to_string(),
+            html_url: "https://example.test/release".to_string(),
+            body: None,
+            published_at: None,
+        }
     }
 }
