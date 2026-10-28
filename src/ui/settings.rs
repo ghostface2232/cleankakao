@@ -38,6 +38,7 @@ use super::theme::{self, Mode, Tokens};
 use crate::config::Config;
 use crate::ico;
 use crate::process_watcher;
+use crate::updater::{ReleaseInfo, UpdateChecker};
 use crate::win32::{is_window_visible, window_text};
 
 const REPO_URL: &str = "https://github.com/ghostface2232/cleankakao";
@@ -59,7 +60,7 @@ const CONTENT_BOTTOM_PAD: f32 = 10.0;
 // may require picking a fresh value by eye.
 const WINDOW_SIZE: Size = Size {
     width: 400.0,
-    height: 570.0,
+    height: 640.0,
 };
 
 const PILL_WIDTH: f32 = 42.0;
@@ -93,10 +94,17 @@ pub struct State {
     // Captured once the window exists; needed to drive the custom title bar's
     // drag and minimize actions, which are window-id-scoped tasks.
     window_id: Option<window::Id>,
+    update_busy: bool,
+    available_update: Option<ReleaseInfo>,
+    update_status: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Message {
+    UpdateAction,
+    UpdateCheckRequested,
+    UpdateChecked(Result<Option<ReleaseInfo>, String>),
+    UpdatePrepared(Result<(), String>),
     ToggleAdBlock(bool),
     ToggleAutoStart(bool),
     ToggleCheckUpdate(bool),
@@ -123,11 +131,61 @@ impl State {
             last_check: now_hhmm(),
             toggle_animation: ToggleAnimation::new(ad_block_on, auto_start, check_update),
             window_id: None,
+            update_busy: false,
+            available_update: None,
+            update_status: String::new(),
         }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::UpdateCheckRequested if !self.update_busy => {
+                // A tray check must never apply a cached release. Installation
+                // remains a separate, deliberate click in the settings window.
+                self.available_update = None;
+                self.update_busy = true;
+                self.update_status = "업데이트 확인 중…".into();
+                return check_update_task();
+            }
+            Message::UpdateCheckRequested => {}
+            Message::UpdateAction if !self.update_busy => {
+                self.update_busy = true;
+                if let Some(release) = self.available_update.take() {
+                    self.update_status = "다운로드 및 검증 중…".into();
+                    return Task::perform(
+                        crate::update_install::prepare(release),
+                        Message::UpdatePrepared,
+                    );
+                }
+                self.update_status = "업데이트 확인 중…".into();
+                return check_update_task();
+            }
+            Message::UpdateAction => {}
+            Message::UpdateChecked(result) => {
+                self.update_busy = false;
+                match result {
+                    Ok(Some(release)) => {
+                        self.update_status = format!("v{} 업데이트 가능", release.version);
+                        self.available_update = Some(release);
+                    }
+                    Ok(None) => {
+                        self.available_update = None;
+                        self.update_status = "최신 버전입니다".into();
+                    }
+                    Err(error) => {
+                        warn!("update check failed: {error}");
+                        self.available_update = None;
+                        self.update_status = "확인 실패 · 다시 시도해 주세요".into();
+                    }
+                }
+            }
+            Message::UpdatePrepared(Ok(())) => return iced::exit(),
+            Message::UpdatePrepared(Err(error)) => {
+                warn!("update preparation failed: {error}");
+                self.update_busy = false;
+                self.available_update = None;
+                self.update_status = "업데이트 실패 · 다시 확인해 주세요".into();
+            }
             Message::ToggleAdBlock(v) => {
                 // Treat banner + popup as one switch: the user has no reason
                 // to keep one kind of ad and not the other.
@@ -162,6 +220,9 @@ impl State {
             Message::StatusTick => {
                 self.kakaotalk_running = process_watcher::find_kakaotalk_process().is_some();
                 self.last_check = now_hhmm();
+                if super::take_update_request() {
+                    return self.update(Message::UpdateCheckRequested);
+                }
             }
             Message::AnimationTick(now) => {
                 self.toggle_animation.update(now);
@@ -315,7 +376,34 @@ impl State {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let body = column![header, ad_block, general, status, footer,].spacing(18);
+        let action_label = if self.update_busy {
+            "처리 중…"
+        } else if self.available_update.is_some() {
+            "업데이트 후 재시작"
+        } else {
+            "업데이트 확인"
+        };
+        let mut action = button(text(action_label).size(theme::CAPTION_SIZE))
+            .padding([6, 10])
+            .style(theme::secondary_button(tokens));
+        if !self.update_busy {
+            action = action.on_press(Message::UpdateAction);
+        }
+        let update = column![
+            row![
+                text(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .size(theme::CAPTION_SIZE)
+                    .color(tokens.text_secondary),
+                Space::new().width(Length::Fill),
+                action
+            ]
+            .align_y(Alignment::Center),
+            text(&self.update_status)
+                .size(theme::CAPTION_SIZE)
+                .color(tokens.text_secondary),
+        ]
+        .spacing(4);
+        let body = column![header, ad_block, general, status, update, footer,].spacing(18);
 
         let content = container(body)
             .padding(
@@ -646,6 +734,7 @@ fn open_url(url: &str) {
 pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
     let mode = detect_system_mode();
     force_settings_renderer();
+    super::listen_for_update_requests();
     // iced exposes no way to grab the underlying HWND, so the Mica setup
     // thread waits for the window to appear by title and then talks to DWM
     // directly. Spawned before `iced::application().run()` because
@@ -654,9 +743,19 @@ pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
 
     iced::application(
         move || {
+            let mut state = State::new(config_handle.clone());
+            let check =
+                state.config.check_update || std::env::args().any(|arg| arg == "--check-updates");
+            let task = if check {
+                state.update_busy = true;
+                state.update_status = "업데이트 확인 중…".into();
+                check_update_task()
+            } else {
+                Task::none()
+            };
             (
-                State::new(config_handle.clone()),
-                window::latest().map(Message::WindowOpened),
+                state,
+                Task::batch([window::latest().map(Message::WindowOpened), task]),
             )
         },
         State::update,
@@ -688,6 +787,13 @@ pub fn run(config_handle: Arc<RwLock<Config>>) -> iced::Result {
         ..Default::default()
     })
     .run()
+}
+
+fn check_update_task() -> Task<Message> {
+    Task::perform(
+        async { UpdateChecker::current().check_latest_version().await },
+        Message::UpdateChecked,
+    )
 }
 
 /// Poll for the settings window by title from a worker thread, then apply
@@ -890,5 +996,43 @@ fn force_settings_renderer() {
     // access is happening.
     unsafe {
         std::env::set_var("ICED_BACKEND", "tiny-skia");
+    }
+}
+
+#[cfg(test)]
+mod update_request_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_tray_check_works_with_auto_checks_disabled_and_never_installs_cached_release() {
+        let config = Config {
+            check_update: false,
+            ..Config::default()
+        };
+        let mut state = State::new(Arc::new(RwLock::new(config)));
+        state.available_update = Some(ReleaseInfo {
+            version: semver::Version::new(99, 0, 0),
+            download_url: String::new(),
+            sha256: String::new(),
+            size: 1,
+            release_url: String::new(),
+            release_notes: String::new(),
+            published_at: String::new(),
+        });
+        let _task = state.update(Message::UpdateCheckRequested);
+        assert!(state.update_busy);
+        assert!(state.available_update.is_none());
+        assert_eq!(state.update_status, "업데이트 확인 중…");
+        assert!(!state.config.check_update);
+    }
+
+    #[test]
+    fn tray_check_does_not_interrupt_an_update_in_progress() {
+        let mut state = State::new(Arc::new(RwLock::new(Config::default())));
+        state.update_busy = true;
+        state.update_status = "다운로드 및 검증 중…".into();
+        let _task = state.update(Message::UpdateCheckRequested);
+        assert!(state.update_busy);
+        assert_eq!(state.update_status, "다운로드 및 검증 중…");
     }
 }
