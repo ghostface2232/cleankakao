@@ -31,7 +31,6 @@ thread_local! {
 pub fn start_reapply_worker(
     adblocker: Arc<Mutex<AdBlocker>>,
     blocking_enabled: Arc<AtomicBool>,
-    kakaotalk_running: Arc<AtomicBool>,
     kakaotalk_pid: Arc<Mutex<Option<u32>>>,
     app_running: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -50,17 +49,22 @@ pub fn start_reapply_worker(
                         .lock()
                         .map(|adblocker| adblocker.has_pending_restore())
                         .unwrap_or(false);
-                    let desired_pid = if kakaotalk_running.load(Ordering::Acquire)
-                        && (blocking_enabled.load(Ordering::Acquire) || has_pending_restore)
-                    {
-                        *kakaotalk_pid.lock().unwrap()
-                    } else {
-                        None
-                    };
+                    let desired_pid =
+                        if blocking_enabled.load(Ordering::Acquire) || has_pending_restore {
+                            *kakaotalk_pid.lock().unwrap()
+                        } else {
+                            None
+                        };
 
                     if hooks.as_ref().map(|h| h.pid) != desired_pid {
                         hooks = desired_pid.and_then(install_hooks);
                         clear_event_pending();
+                        if desired_pid.is_some() {
+                            sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_pid);
+                        }
+                        burst_until = hooks
+                            .as_ref()
+                            .map(|_| Instant::now() + RESTORE_BURST_DURATION);
                     }
                 }
 
@@ -74,13 +78,13 @@ pub fn start_reapply_worker(
 
                 if take_event_pending() {
                     debug!("KakaoTalk window event observed; syncing ad blocker state");
-                    sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_running);
+                    sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_pid);
                     burst_until = Some(Instant::now() + RESTORE_BURST_DURATION);
                     continue;
                 }
 
                 if burst_until.is_some_and(|deadline| Instant::now() < deadline) {
-                    sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_running);
+                    sync_adblocker_state(&adblocker, &blocking_enabled, &kakaotalk_pid);
                 } else {
                     burst_until = None;
                 }
@@ -92,15 +96,14 @@ pub fn start_reapply_worker(
 fn sync_adblocker_state(
     adblocker: &Arc<Mutex<AdBlocker>>,
     blocking_enabled: &Arc<AtomicBool>,
-    kakaotalk_running: &Arc<AtomicBool>,
+    kakaotalk_pid: &Mutex<Option<u32>>,
 ) {
-    if !kakaotalk_running.load(Ordering::Acquire) {
-        return;
-    }
-
     if let Ok(mut adblocker) = adblocker.lock() {
         if blocking_enabled.load(Ordering::Acquire) {
-            adblocker.apply_all();
+            let pid = *kakaotalk_pid.lock().unwrap();
+            if let Some(pid) = pid {
+                adblocker.apply_for_pid(pid);
+            }
         } else {
             adblocker.restore_all();
         }
