@@ -131,7 +131,6 @@ fn main() {
     let _window_event_reapply = window_events::start_reapply_worker(
         Arc::clone(&adblocker),
         Arc::clone(&blocking_enabled),
-        Arc::clone(&kakaotalk_running),
         Arc::clone(&kakaotalk_pid),
         Arc::clone(&app_running),
     );

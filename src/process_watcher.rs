@@ -57,8 +57,7 @@ impl ProcessWatcher {
         Arc::clone(&self.is_running)
     }
 
-    /// Shareable handle to the cached PID. Read inside callbacks or from the
-    /// tray thread to look up the current KakaoTalk process.
+    /// The discovered PID is available before the main window is ready.
     pub fn pid_handle(&self) -> Arc<Mutex<Option<u32>>> {
         Arc::clone(&self.kakaotalk_pid)
     }
@@ -97,61 +96,28 @@ impl ProcessWatcher {
             .spawn(move || {
                 while app_running.load(Ordering::Acquire) {
                     let pid_now = find_kakaotalk_process();
-                    let was_running = is_running.load(Ordering::Acquire);
                     let cached_pid = *kakaotalk_pid.lock().unwrap();
 
-                    match (was_running, pid_now) {
-                        (false, None) => {}
-
-                        // Fresh launch candidate. The PID may exist before the
-                        // main window does (e.g. Windows logon launches this
-                        // app before KakaoTalk finishes startup), so wait for
-                        // the HWND for a bounded window before committing to
-                        // "running".
-                        (false, Some(pid)) => {
-                            if wait_for_kakaotalk_main_hwnd(pid, &app_running).is_some() {
-                                info!("KakaoTalk ready (pid={pid})");
-                                *kakaotalk_pid.lock().unwrap() = Some(pid);
-                                is_running.store(true, Ordering::Release);
-
-                                fire_startup_apply_window(&on_start, &app_running);
-                            } else {
-                                debug!(
-                                    "KakaoTalk pid {pid} present but main window not ready within {:?}",
-                                    MAIN_HWND_WAIT_TIMEOUT
-                                );
-                            }
-                        }
-
-                        // Exit. Clear the cached PID and notify downstream
-                        // listeners so they drop any per-process state.
-                        (true, None) => {
+                    if pid_now != cached_pid {
+                        *kakaotalk_pid.lock().unwrap() = None;
+                        is_running.store(false, Ordering::Release);
+                        if cached_pid.is_some() {
                             info!("KakaoTalk exited (was pid={cached_pid:?})");
-                            *kakaotalk_pid.lock().unwrap() = None;
-                            is_running.store(false, Ordering::Release);
                             fire(&on_stop);
                         }
+                        // Login popups can appear before the main HWND.
+                        *kakaotalk_pid.lock().unwrap() = pid_now;
+                    }
 
-                        // Still running. Detect a fast restart that swapped
-                        // PIDs between two polls — without this, the cached
-                        // HWND in downstream modules would point at a dead
-                        // process and ad blocking would silently break.
-                        (true, Some(pid)) => {
-                            if cached_pid != Some(pid) {
-                                warn!(
-                                    "KakaoTalk pid changed without observed exit: {cached_pid:?} -> {pid}"
-                                );
-                                fire(&on_stop);
-
-                                if wait_for_kakaotalk_main_hwnd(pid, &app_running).is_some() {
-                                    *kakaotalk_pid.lock().unwrap() = Some(pid);
-                                    is_running.store(true, Ordering::Release);
-                                    fire_startup_apply_window(&on_start, &app_running);
-                                } else {
-                                    *kakaotalk_pid.lock().unwrap() = None;
-                                    is_running.store(false, Ordering::Release);
-                                }
-                            }
+                    if let Some(pid) = pid_now
+                        && !is_running.load(Ordering::Acquire)
+                    {
+                        if wait_for_kakaotalk_main_hwnd(pid, &app_running).is_some() {
+                            info!("KakaoTalk ready (pid={pid})");
+                            is_running.store(true, Ordering::Release);
+                            fire_startup_apply_window(&on_start, &app_running);
+                        } else {
+                            debug!("KakaoTalk main window not ready for pid {pid}");
                         }
                     }
 
@@ -286,7 +252,7 @@ fn exe_name_matches(buf: &[u16], target: &str) -> bool {
 /// it belongs to `pid`. Returns `None` if the window has not been created yet
 /// (process exists, UI not up) or if the matching window belongs to some
 /// other process that happens to share the title.
-fn find_kakaotalk_main_hwnd(pid: u32) -> Option<HWND> {
+pub fn find_kakaotalk_main_hwnd(pid: u32) -> Option<HWND> {
     let titles: [PCWSTR; 3] = [w!("카카오톡"), w!("KakaoTalk"), w!("カカオトーク")];
 
     for title in titles {

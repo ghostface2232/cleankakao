@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::{Arc, RwLock};
 
-use log::{debug, info, warn};
+use log::{debug, info};
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -23,12 +23,14 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumThreadWindows, EnumWindows, FindWindowW, GWL_STYLE, GetParent,
     GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow, WS_POPUP,
+    SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow,
+    WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 use crate::config::Config;
 use crate::constants::KAKAOTALK_EXE;
+use crate::process_watcher::find_kakaotalk_main_hwnd;
 use crate::win32::{class_name, is_window_visible, window_text};
 
 // The bottom ad strip is covered by shrinking the main-view height by 31 px;
@@ -49,6 +51,7 @@ const POPUP_MIN_DIM: i32 = 80;
 const POPUP_MAX_DIM: i32 = 900;
 #[derive(Debug, Clone, Copy)]
 struct WindowState {
+    pid: u32,
     rect: RECT,
     visible: bool,
     kind: RestoreKind,
@@ -58,6 +61,7 @@ struct WindowState {
 enum RestoreKind {
     ResizedPane,
     HiddenWindow,
+    HiddenPopup,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,47 +116,52 @@ impl AdBlocker {
     }
 
     pub fn apply_all(&mut self) {
-        let cfg = self.config.read().unwrap().clone();
-
-        let main = match self.locate_main_window() {
-            Some(h) => h,
-            None => {
-                debug!("apply_all: KakaoTalk main window not found");
-                return;
-            }
-        };
-
-        if is_iconic(main) {
-            return;
+        if let Some(main) = self.locate_main_window() {
+            self.apply(Some(main), window_pid(main));
         }
+    }
 
-        // KakaoTalk can sit in the tray with its main window hidden but not
-        // iconic. OnlineMainView is a CEF-backed compositor surface; resizing
-        // it while the window is hidden leaves it black — and the hidden banner
-        // slot white — once the window is later shown, because CEF only repaints
-        // on its own paint cycle, not on our SetWindowPos/RedrawWindow. Defer
-        // until the window is actually visible; the WinEvent foreground/show
-        // hooks and the periodic fallback reapply as soon as it appears.
-        if !is_window_visible(main) {
-            debug!("apply_all: main window hidden (tray); deferring until visible");
-            return;
-        }
+    pub fn apply_for_pid(&mut self, pid: u32) {
+        let main = self
+            .main_hwnd()
+            .filter(|hwnd| window_pid(*hwnd) == pid)
+            .or_else(|| find_kakaotalk_main_hwnd(pid));
+        self.main_hwnd = main;
+        self.apply(main, pid);
+    }
 
-        let pid = window_pid(main);
+    fn apply(&mut self, main: Option<HWND>, pid: u32) {
         if pid == 0 || !process_image_is(pid, KAKAOTALK_EXE) {
-            warn!("apply_all: main hwnd PID/image verification failed");
             return;
         }
 
-        if cfg.ad_block_banner {
-            for ad in self.find_main_window_ads(main, pid) {
-                self.remove_ad(&ad);
-            }
-        }
+        let cfg = self.config.read().unwrap().clone();
 
         if cfg.ad_block_popup {
             for ad in find_popup_ads(main, pid) {
-                self.remove_ad(&ad);
+                self.remove_ad(&ad, pid);
+            }
+        }
+
+        // Resizing a hidden CEF pane leaves it black on restore. Defer
+        // changes to the main layout until KakaoTalk shows the window.
+        let Some(main) = main.filter(|hwnd| !is_iconic(*hwnd) && is_window_visible(*hwnd)) else {
+            return;
+        };
+
+        if cfg.ad_block_banner {
+            for ad in self.find_main_window_ads(main, pid) {
+                self.remove_ad(&ad, pid);
+            }
+        }
+
+        if cfg.ad_block_popup
+            && let Some(main_rect) = window_rect(main)
+        {
+            for hwnd in enum_related_process_windows(main, pid) {
+                if is_bottom_banner_frame(hwnd, main, &main_rect) {
+                    self.remove_ad(&AdWindow::BannerSlot { hwnd }, pid);
+                }
             }
         }
     }
@@ -162,26 +171,26 @@ impl AdBlocker {
             return;
         }
 
-        // Defer while the window is minimized or hidden in the tray, for the
-        // same CEF-repaint reason as `apply_all`. The saved state is left intact
-        // (not drained), so the pending restore replays once the window is shown
-        // again via the WinEvent burst.
-        if let Some(main) = self.main_hwnd().or_else(|| self.locate_main_window())
-            && (is_iconic(main) || !is_window_visible(main))
-        {
-            return;
-        }
+        let restore_layout = self
+            .main_hwnd()
+            .or_else(|| self.locate_main_window())
+            .is_none_or(|main| !is_iconic(main) && is_window_visible(main));
 
-        let mut states: Vec<_> = self.original.drain().collect();
-        states.sort_by_key(|(_, state)| match state.kind {
-            RestoreKind::ResizedPane => 0,
-            RestoreKind::HiddenWindow => 1,
-        });
+        let mut states: Vec<_> = self
+            .original
+            .extract_if(|_, state| restore_layout || state.kind == RestoreKind::HiddenPopup)
+            .collect();
+        states.sort_by_key(|(_, state)| state.kind != RestoreKind::ResizedPane);
 
+        let mut redraw_main_for_pid = None;
         for (raw, state) in states {
             let hwnd = HWND(raw as *mut c_void);
-            if !is_window(hwnd) {
+            if window_pid(hwnd) != state.pid || !process_image_is(state.pid, KAKAOTALK_EXE) {
                 continue;
+            }
+
+            if state.kind != RestoreKind::HiddenPopup {
+                redraw_main_for_pid = Some(state.pid);
             }
 
             match state.kind {
@@ -216,13 +225,17 @@ impl AdBlocker {
                     let _ = unsafe { ShowWindow(hwnd, cmd) };
                     update_window(hwnd);
                 }
+                RestoreKind::HiddenPopup => {
+                    // SAFETY: The popup belongs to the verified KakaoTalk PID.
+                    let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+                }
             }
         }
 
-        if let Some(main) = self.main_hwnd {
-            if is_window(main) {
-                update_window(main);
-            }
+        if let Some(main) = self.main_hwnd()
+            && redraw_main_for_pid == Some(window_pid(main))
+        {
+            update_window(main);
         }
     }
 
@@ -321,7 +334,11 @@ impl AdBlocker {
         is_bottom_banner_rect(main_rect, &rect)
     }
 
-    fn remove_ad(&mut self, ad: &AdWindow) {
+    fn remove_ad(&mut self, ad: &AdWindow, pid: u32) {
+        if window_pid(ad.hwnd()) != pid {
+            return;
+        }
+
         match *ad {
             AdWindow::MainView {
                 hwnd,
@@ -342,7 +359,7 @@ impl AdBlocker {
                     return;
                 }
 
-                self.save_state(hwnd, RestoreKind::ResizedPane);
+                self.save_state(hwnd, pid, RestoreKind::ResizedPane);
                 update_window(hwnd);
                 // SAFETY: `hwnd` is live. SWP_NOMOVE avoids mixing screen
                 // and parent-client coordinates. This is a child main-view
@@ -368,19 +385,25 @@ impl AdBlocker {
                 if !is_window(hwnd) || !is_window_visible(hwnd) {
                     return;
                 }
-                self.save_state(hwnd, RestoreKind::HiddenWindow);
+                let kind = match ad {
+                    AdWindow::Popup { .. } => RestoreKind::HiddenPopup,
+                    _ => RestoreKind::HiddenWindow,
+                };
+                self.save_state(hwnd, pid, kind);
                 // SAFETY: `hwnd` is live and this is the documented way to
                 // hide a child/top-level window without clipping the CEF
                 // compositor tree into a black frame.
                 let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
-                if let Some(main) = self.main_hwnd {
+                if kind == RestoreKind::HiddenWindow
+                    && let Some(main) = self.main_hwnd
+                {
                     update_window(main);
                 }
             }
         }
     }
 
-    fn save_state(&mut self, hwnd: HWND, kind: RestoreKind) {
+    fn save_state(&mut self, hwnd: HWND, pid: u32, kind: RestoreKind) {
         let key = hwnd.0 as isize;
         if self.original.contains_key(&key) {
             return;
@@ -390,6 +413,7 @@ impl AdBlocker {
             self.original.insert(
                 key,
                 WindowState {
+                    pid,
                     rect,
                     visible: is_window_visible(hwnd),
                     kind,
@@ -492,21 +516,17 @@ fn is_bottom_banner_rect(main_rect: &RECT, rect: &RECT) -> bool {
 }
 
 struct PopupCtx {
-    main_key: isize,
-    main_rect: RECT,
+    main: Option<HWND>,
+    main_rect: Option<RECT>,
     pid: u32,
     seen: HashSet<isize>,
     out: Vec<AdWindow>,
 }
 
-fn find_popup_ads(main_hwnd: HWND, pid: u32) -> Vec<AdWindow> {
-    let main_rect = match window_rect(main_hwnd) {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
+fn find_popup_ads(main: Option<HWND>, pid: u32) -> Vec<AdWindow> {
     let mut ctx = PopupCtx {
-        main_key: main_hwnd.0 as isize,
-        main_rect,
+        main,
+        main_rect: main.and_then(window_rect),
         pid,
         seen: HashSet::new(),
         out: Vec::new(),
@@ -514,16 +534,9 @@ fn find_popup_ads(main_hwnd: HWND, pid: u32) -> Vec<AdWindow> {
     let lparam = LPARAM(&mut ctx as *mut PopupCtx as isize);
     // SAFETY: ctx outlives this synchronous EnumWindows call.
     let _ = unsafe { EnumWindows(Some(collect_popup), lparam) };
-    let thread_id = window_thread_id(main_hwnd);
-    if thread_id != 0 {
+    if let Some(thread_id) = main.map(window_thread_id).filter(|id| *id != 0) {
         // SAFETY: ctx still outlives this synchronous EnumThreadWindows call.
         let _ = unsafe { EnumThreadWindows(thread_id, Some(collect_popup), lparam) };
-    }
-    for hwnd in enum_related_process_windows(main_hwnd, pid) {
-        let already_selected = ctx.out.iter().any(|ad| ad.hwnd().0 == hwnd.0);
-        if !already_selected && is_bottom_banner_frame(hwnd, ctx.main_key, &ctx.main_rect) {
-            ctx.out.push(AdWindow::BannerSlot { hwnd });
-        }
     }
     ctx.out
 }
@@ -569,14 +582,14 @@ fn enum_related_process_windows(main_hwnd: HWND, pid: u32) -> Vec<HWND> {
     ctx.out
 }
 
-fn is_bottom_banner_frame(hwnd: HWND, main_key: isize, main_rect: &RECT) -> bool {
+fn is_bottom_banner_frame(hwnd: HWND, main: HWND, main_rect: &RECT) -> bool {
     if !is_window_visible(hwnd) {
         return false;
     }
     if class_name(hwnd) != "EVA_Window_Dblclk" || !window_text(hwnd).is_empty() {
         return false;
     }
-    if parent_hwnd(hwnd).map(|p| p.0 as isize) != Some(main_key) {
+    if parent_hwnd(hwnd) != Some(main) {
         return false;
     }
     let rect = match window_rect(hwnd) {
@@ -592,7 +605,7 @@ unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let ctx = unsafe { &mut *(lparam.0 as *mut PopupCtx) };
     let key = hwnd.0 as isize;
 
-    if key == ctx.main_key || !ctx.seen.insert(key) {
+    if Some(hwnd) == ctx.main || !ctx.seen.insert(key) {
         return BOOL(1);
     }
     if !is_window_visible(hwnd) {
@@ -620,23 +633,20 @@ unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let title = window_text(hwnd);
     let class = class_name(hwnd);
     let parent = parent_hwnd(hwnd);
-    let parent_key = parent.map(|p| p.0 as isize);
-    let is_bottom_banner_frame = class == "EVA_Window_Dblclk"
-        && title.is_empty()
-        && parent_key == Some(ctx.main_key)
-        && is_bottom_banner_rect(&ctx.main_rect, &rect);
-    if is_bottom_banner_frame {
-        debug!(
-            "bottom banner frame candidate hwnd={:?} size={}x{} title={:?}",
-            hwnd.0, w, h, title
-        );
-        ctx.out.push(AdWindow::BannerSlot { hwnd });
+    let owned_by_main = parent.is_some() && parent == ctx.main;
+    if owned_by_main
+        && class == "EVA_Window_Dblclk"
+        && ctx
+            .main_rect
+            .as_ref()
+            .is_some_and(|main| is_bottom_banner_rect(main, &rect))
+    {
         return BOOL(1);
     }
 
     let is_kakaotalk_ad_popup_shape = match class.as_str() {
         "EVA_Window" => title.is_empty() && parent.is_none(),
-        "EVA_Window_Dblclk" => title.is_empty() && parent_key == Some(ctx.main_key),
+        "EVA_Window_Dblclk" => title.is_empty() && owned_by_main,
         _ => false,
     };
     if !is_kakaotalk_ad_popup_shape {
