@@ -15,7 +15,8 @@ use log::{debug, info};
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
+    RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -49,6 +50,16 @@ const DIRECT_BANNER_BOTTOM_TOLERANCE_PX: i32 = 12;
 
 const POPUP_MIN_DIM: i32 = 80;
 const POPUP_MAX_DIM: i32 = 900;
+
+// Rich-pop ads are rendered natively (no CEF child) as a card anchored to the
+// bottom-right corner of the work area, where KakaoTalk message alerts also
+// appear. Alerts are short strips, so the card-like aspect ratio of the single
+// content pane (observed 300x189) is what separates the two.
+const RICH_POP_CORNER_TOLERANCE_PX: i32 = 64;
+const RICH_POP_MIN_ASPECT: f32 = 1.5;
+const RICH_POP_MAX_ASPECT: f32 = 1.7;
+const RICH_POP_MIN_CONTENT_WIDTH_RATIO: f32 = 0.8;
+
 #[derive(Debug, Clone, Copy)]
 struct WindowState {
     pid: u32,
@@ -649,19 +660,65 @@ unsafe extern "system" fn collect_popup(hwnd: HWND, lparam: LPARAM) -> BOOL {
         "EVA_Window_Dblclk" => title.is_empty() && owned_by_main,
         _ => false,
     };
-    if !is_kakaotalk_ad_popup_shape {
-        return BOOL(1);
-    }
-    if !has_chrome_descendant(hwnd) {
+    let is_ad = (is_kakaotalk_ad_popup_shape && has_chrome_descendant(hwnd))
+        || is_corner_rich_popup(hwnd, &class, &title, &rect);
+    if !is_ad {
         return BOOL(1);
     }
 
     debug!(
-        "popup candidate hwnd={:?} size={}x{} title={:?}",
-        hwnd.0, w, h, title
+        "popup candidate hwnd={:?} class={} size={}x{} title={:?}",
+        hwnd.0, class, w, h, title
     );
     ctx.out.push(AdWindow::Popup { hwnd });
     BOOL(1)
+}
+
+fn is_corner_rich_popup(hwnd: HWND, class: &str, title: &str, rect: &RECT) -> bool {
+    if !matches!(class, "EVA_Window" | "EVA_Window_Dblclk") || !title.is_empty() {
+        return false;
+    }
+    if !monitor_work_area(hwnd).is_some_and(|work| is_corner_anchored(&work, rect)) {
+        return false;
+    }
+    enum_direct_children(hwnd).into_iter().any(|child| {
+        is_window_visible(child)
+            && class_name(child) == "EVA_ChildWindow"
+            && window_text(child).is_empty()
+            && window_rect(child).is_some_and(|content| is_rich_pop_content_rect(rect, &content))
+    })
+}
+
+fn is_corner_anchored(work: &RECT, rect: &RECT) -> bool {
+    (work.right - rect.right).abs() <= RICH_POP_CORNER_TOLERANCE_PX
+        && (work.bottom - rect.bottom).abs() <= RICH_POP_CORNER_TOLERANCE_PX
+}
+
+fn is_rich_pop_content_rect(frame: &RECT, content: &RECT) -> bool {
+    let frame_width = frame.right - frame.left;
+    let width = content.right - content.left;
+    let height = content.bottom - content.top;
+    if frame_width <= 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+    let aspect = width as f32 / height as f32;
+    (width as f32) >= (frame_width as f32) * RICH_POP_MIN_CONTENT_WIDTH_RATIO
+        && (RICH_POP_MIN_ASPECT..=RICH_POP_MAX_ASPECT).contains(&aspect)
+}
+
+fn monitor_work_area(hwnd: HWND) -> Option<RECT> {
+    // SAFETY: MonitorFromWindow accepts any HWND; MONITOR_DEFAULTTONEAREST
+    // always yields a monitor handle for a live window.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a live stack MONITORINFO with cbSize initialized as
+    // GetMonitorInfoW requires.
+    unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+        .then_some(info.rcWork)
 }
 
 fn window_pid(hwnd: HWND) -> u32 {
@@ -802,6 +859,315 @@ mod tests {
         }
         assert!(!is_bottom_banner_rect(&main, &rect(0, 650, 419, 800)));
         assert!(!is_bottom_banner_rect(&main, &rect(0, 630, 600, 780)));
+    }
+
+    #[test]
+    fn rich_pop_matches_reported_corner_card() {
+        // Reported rich pop on a 2560x1440 screen with a 48 px taskbar.
+        let work = rect(0, 0, 2560, 1392);
+        let card = rect(2250, 1180, 2550, 1369);
+
+        assert!(is_corner_anchored(&work, &card));
+        assert!(is_rich_pop_content_rect(&card, &card));
+    }
+
+    #[test]
+    fn rich_pop_rejects_off_corner_or_alert_strip() {
+        let work = rect(0, 0, 2560, 1392);
+
+        // Centered dialog of the same size.
+        assert!(!is_corner_anchored(&work, &rect(1130, 600, 1430, 789)));
+        // Bottom-left corner.
+        assert!(!is_corner_anchored(&work, &rect(10, 1180, 310, 1369)));
+        // Short message-alert strip in the same corner.
+        let alert = rect(2250, 1279, 2550, 1369);
+        assert!(!is_rich_pop_content_rect(&alert, &alert));
+        // Content pane much narrower than its frame.
+        assert!(!is_rich_pop_content_rect(
+            &rect(2150, 1180, 2550, 1369),
+            &rect(2250, 1180, 2550, 1369)
+        ));
+    }
+
+    /// Spawns real top-level windows that mimic the reported rich pop (and
+    /// near-miss shapes) in this test process, then runs the popup detector
+    /// and hider against them. The KakaoTalk image check lives in `apply`, so
+    /// the detector can be pointed at this process's PID. Windows briefly
+    /// appear in the bottom-right corner. Run with:
+    ///     cargo test -- --ignored --nocapture rich_pop_fake_windows
+    #[test]
+    #[ignore]
+    fn rich_pop_fake_windows() {
+        use windows::Win32::Foundation::{LRESULT, POINT, WPARAM};
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WINDOW_EX_STYLE,
+            WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_VISIBLE,
+        };
+
+        unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            // SAFETY: Forwards the unmodified message to the default handler.
+            unsafe { DefWindowProcW(h, m, w, l) }
+        }
+
+        const FAKE: PCWSTR = w!("CleanKakao_FakeWindow");
+        for class in [
+            w!("EVA_Window"),
+            w!("EVA_Window_Dblclk"),
+            w!("EVA_ChildWindow"),
+            FAKE,
+        ] {
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            // SAFETY: `wc` is fully initialized and `class` is a static literal.
+            unsafe { RegisterClassW(&wc) };
+        }
+
+        // SAFETY: MonitorFromPoint accepts any point; DEFAULTTOPRIMARY always
+        // returns a monitor.
+        let primary = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a live MONITORINFO with cbSize set.
+        assert!(unsafe { GetMonitorInfoW(primary, &mut info) }.as_bool());
+        let work = info.rcWork;
+
+        struct Case {
+            name: &'static str,
+            class: PCWSTR,
+            title: PCWSTR,
+            frame: RECT,
+            content: RECT,
+            content_title: PCWSTR,
+            expect: bool,
+        }
+
+        let mut seed: u64 = 0x5eed_c1ea_4ca0;
+        let mut next = |lo: i32, hi: i32| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) as i32).rem_euclid(hi - lo + 1)
+        };
+
+        let pid = std::process::id();
+        let rounds = 30;
+        let mut checked = 0;
+        let mut failures = Vec::new();
+
+        for round in 0..rounds {
+            let mr = next(0, 40);
+            let mb = next(0, 40);
+            let card_h = next(178, 198);
+            // Frame anchored at the bottom-right corner, `w` x `h`.
+            let corner = |w: i32, h: i32| {
+                rect(
+                    work.right - mr - w,
+                    work.bottom - mb - h,
+                    work.right - mr,
+                    work.bottom - mb,
+                )
+            };
+            let full = |w: i32, h: i32| rect(0, 0, w, h);
+            let center_x = (work.left + work.right) / 2;
+            let center_y = (work.top + work.bottom) / 2;
+
+            let cases = [
+                Case {
+                    name: "corner card EVA_Window",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(300, card_h),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: true,
+                },
+                Case {
+                    name: "corner card EVA_Window_Dblclk",
+                    class: w!("EVA_Window_Dblclk"),
+                    title: w!(""),
+                    frame: corner(300, card_h),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: true,
+                },
+                Case {
+                    name: "corner alert strip",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(300, 90),
+                    content: full(300, 90),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "corner too wide (1.76)",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(300, 170),
+                    content: full(300, 170),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "corner too tall (1.43)",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(300, 210),
+                    content: full(300, 210),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "centered card",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: rect(center_x - 150, center_y - 95, center_x + 150, center_y + 94),
+                    content: full(300, 189),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "bottom-left card",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: rect(
+                        work.left + mr,
+                        work.bottom - mb - card_h,
+                        work.left + mr + 300,
+                        work.bottom - mb,
+                    ),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "card above corner",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: rect(
+                        work.right - mr - 300,
+                        work.bottom - 150 - card_h,
+                        work.right - mr,
+                        work.bottom - 150,
+                    ),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "titled frame",
+                    class: w!("EVA_Window"),
+                    title: w!("Notice"),
+                    frame: corner(300, card_h),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "titled content",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(300, card_h),
+                    content: full(300, card_h),
+                    content_title: w!("NotificationView"),
+                    expect: false,
+                },
+                Case {
+                    name: "narrow content in wide frame",
+                    class: w!("EVA_Window"),
+                    title: w!(""),
+                    frame: corner(400, card_h),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: false,
+                },
+                Case {
+                    name: "non-EVA class",
+                    class: FAKE,
+                    title: w!(""),
+                    frame: corner(300, card_h),
+                    content: full(300, card_h),
+                    content_title: w!(""),
+                    expect: false,
+                },
+            ];
+
+            for case in cases {
+                let f = case.frame;
+                let c = case.content;
+                // SAFETY: Classes are registered above; all strings are static.
+                let frame = unsafe {
+                    CreateWindowExW(
+                        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                        case.class,
+                        case.title,
+                        WS_POPUP | WS_VISIBLE,
+                        f.left,
+                        f.top,
+                        f.right - f.left,
+                        f.bottom - f.top,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .expect("create frame");
+                // SAFETY: `frame` is a live window owned by this thread.
+                let _ = unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        w!("EVA_ChildWindow"),
+                        case.content_title,
+                        WS_CHILD | WS_VISIBLE,
+                        c.left,
+                        c.top,
+                        c.right - c.left,
+                        c.bottom - c.top,
+                        Some(frame),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .expect("create content");
+
+                let detected = find_popup_ads(None, pid)
+                    .iter()
+                    .any(|ad| ad.hwnd() == frame);
+                let mut ok = detected == case.expect;
+                if detected {
+                    let mut blocker = AdBlocker::new(Arc::new(RwLock::new(Config::default())));
+                    blocker.remove_ad(&AdWindow::Popup { hwnd: frame }, pid);
+                    ok &= !is_window_visible(frame);
+                }
+                if !ok {
+                    failures.push(format!(
+                        "round {round} '{}': expected {}, detected {detected}, frame={:?}",
+                        case.name, case.expect, f
+                    ));
+                }
+                checked += 1;
+                // SAFETY: `frame` is owned by this thread; destroying it also
+                // destroys its child.
+                let _ = unsafe { DestroyWindow(frame) };
+            }
+        }
+
+        println!(
+            "work area {work:?}: {checked} cases, {} failures",
+            failures.len()
+        );
+        for failure in &failures {
+            println!("  {failure}");
+        }
+        assert!(failures.is_empty());
     }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
